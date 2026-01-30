@@ -181,6 +181,60 @@ def telegram_approval(message: str, timeout_minutes: int = 60) -> bool:
     return True
 
 
+def telegram_wait_for_start(setting_prompt: str = None) -> str:
+    """Wartet auf /start Befehl via Telegram, gibt Setting zurück"""
+    
+    if setting_prompt:
+        telegram_send(f"🤖 *Novel Pipeline V4 bereit*\n\nSetting: {setting_prompt}\n\nSende /start um zu beginnen")
+    else:
+        telegram_send("🤖 *Novel Pipeline V4 bereit*\n\nSende /start <setting> um einen Roman zu starten\n\nBeispiel: `/start Archäologin auf Kreta entdeckt antikes Geheimnis`")
+    
+    log("📱 Warte auf Telegram /start Befehl...")
+    
+    # Letzte Update-ID merken
+    try:
+        updates = requests.get(
+            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getUpdates",
+            timeout=10
+        ).json()
+        last_update_id = updates["result"][-1]["update_id"] if updates.get("result") else 0
+    except:
+        last_update_id = 0
+    
+    while True:
+        time.sleep(3)
+        
+        try:
+            updates = requests.get(
+                f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getUpdates",
+                params={"offset": last_update_id + 1},
+                timeout=10
+            ).json()
+            
+            for update in updates.get("result", []):
+                last_update_id = update["update_id"]
+                text = update.get("message", {}).get("text", "").strip()
+                
+                if text.lower().startswith("/start"):
+                    # Setting aus Nachricht extrahieren
+                    parts = text.split(maxsplit=1)
+                    if len(parts) > 1:
+                        setting = parts[1]
+                    elif setting_prompt:
+                        setting = setting_prompt
+                    else:
+                        telegram_send("⚠️ Bitte Setting angeben: `/start <setting>`")
+                        continue
+                    
+                    log(f"✅ Start-Befehl erhalten: {setting}")
+                    telegram_send(f"🚀 *Starte Pipeline*\n\n{setting}")
+                    return setting
+                    
+        except Exception as e:
+            log(f"   ⚠️ Telegram Polling Fehler: {e}")
+            continue
+
+
 # ============================================================
 # QDRANT + OPENAI EMBEDDINGS
 # ============================================================
@@ -579,26 +633,47 @@ Die überarbeitete Version muss KOMPLETT sein - nicht nur die Änderungen!
         else:
             log(f"   ⚠️ Überarbeitung zu kurz, behalte vorherige Version")
     
-    # TELEGRAM APPROVAL
-    log(f"\n   📱 Sende Synopsis zur Freigabe...")
+    # TELEGRAM APPROVAL - Gliederung direkt
+    log(f"\n   📱 Sende Gliederung zur Freigabe...")
     
-    synopsis_prompt = f"""Fasse diese Gliederung in einer SPANNENDEN Synopsis zusammen (max 800 Zeichen):
-
-{gliederung[:6000]}
-
-Enthalten muss:
-- Heldin + Hero (Namen!)
-- Der zentrale Konflikt
-- Was ist der Hook?
-
-NUR die Synopsis, keine Einleitung."""
-
-    synopsis = call_gemini(synopsis_prompt, max_tokens=500)
+    # Kurze Übersicht für Telegram erstellen
+    def extract_summary(text):
+        """Extrahiert Titel, Charaktere und Phasen-Übersicht"""
+        lines = []
+        
+        # Titel
+        match = re.search(r'Titel[:\s]*(.+)', text, re.IGNORECASE)
+        if match:
+            lines.append(f"📖 *{match.group(1).strip()}*")
+        
+        # Heldin
+        match = re.search(r'HELDIN.*?Name[,:\s]*([^\n,]+)', text, re.IGNORECASE | re.DOTALL)
+        if match:
+            lines.append(f"👩 Heldin: {match.group(1).strip()}")
+        
+        # Hero
+        match = re.search(r'HERO.*?Name[,:\s]*([^\n,]+)', text, re.IGNORECASE | re.DOTALL)
+        if match:
+            lines.append(f"👨 Hero: {match.group(1).strip()}")
+        
+        # Antagonist
+        match = re.search(r'ANTAGONIST.*?Name[,:\s]*([^\n,]+)', text, re.IGNORECASE | re.DOTALL)
+        if match:
+            lines.append(f"😈 Antagonist: {match.group(1).strip()}")
+        
+        # Nebencharaktere zählen
+        neben_count = len(re.findall(r'Name[,:\s]+[A-Z][a-zäöü]+', text[text.find('NEBENCHARAKTER'):] if 'NEBENCHARAKTER' in text else ''))
+        if neben_count:
+            lines.append(f"👥 {neben_count} Nebencharaktere")
+        
+        return "\n".join(lines) if lines else text[:1000]
     
     max_attempts = 5
     for attempt in range(max_attempts):
+        summary = extract_summary(gliederung)
+        
         approved = telegram_approval(
-            f"📖 *SYNOPSIS* (Versuch {attempt+1}/{max_attempts}):\n\n{synopsis[:1500]}"
+            f"📋 *GLIEDERUNG* (Versuch {attempt+1}/{max_attempts})\n\n{summary}\n\n_Vollständige Gliederung: {len(gliederung)} Zeichen_"
         )
         
         if approved:
@@ -616,7 +691,6 @@ NUR die Synopsis, keine Einleitung."""
             for j in range(iterations):
                 critique_prompt = f"""{SELF_CRITIQUE_PROMPT}\n\n{gliederung}\n\nVOLLSTÄNDIG ÜBERARBEITETE Gliederung:"""
                 gliederung = call_gemini(critique_prompt, max_tokens=12000)
-            synopsis = call_gemini(synopsis_prompt, max_tokens=500)
             save_versioned(output_dir, "01_gliederung.md", gliederung, iteration=attempt+iterations+2)
     
     # Finale Version speichern
@@ -682,6 +756,22 @@ KRITIK + VOLLSTÄNDIG ÜBERARBEITETE Akt-Gliederung:""", max_tokens=8000)
             akt = critique
             log(f"      ✓ Überarbeitet")
             save_versioned(output_dir, f"02_akt_{akt_num}.md", akt, iteration=2)
+        
+        # TELEGRAM APPROVAL für diesen Akt
+        kapitel_match = re.findall(r'Kapitel\s*(\d+)[:\s]*([^\n]+)', akt, re.IGNORECASE)
+        kapitel_list = "\n".join([f"  {num}: {titel[:40]}" for num, titel in kapitel_match[:10]])
+        
+        approved = telegram_approval(
+            f"📋 *AKT {akt_num}*\n\n{beschreibung}\n\n*Kapitel:*\n{kapitel_list}\n\n_({len(akt)} Zeichen)_"
+        )
+        
+        if not approved:
+            log(f"   🔄 Akt {akt_num} abgelehnt - generiere neu...")
+            akt = call_gemini(prompt, max_tokens=8000)
+            critique = call_gemini(f"""{SELF_CRITIQUE_PROMPT}\n\nAkt {akt_num}:\n{akt}\n\nÜBERARBEITET:""", max_tokens=8000)
+            if len(critique) > len(akt) * 0.5:
+                akt = critique
+            save_versioned(output_dir, f"02_akt_{akt_num}.md", akt, iteration=3)
         
         akte[f"akt_{akt_num}"] = akt
         save_versioned(output_dir, f"02_akt_{akt_num}.md", akt)
@@ -1042,19 +1132,36 @@ def phase5_flow_check(chapters: list, output_dir: Path) -> list:
         prev_end = ' '.join(prev_words[-(len(prev_words)//3):])
         curr_start = ' '.join(curr_words[:len(curr_words)//3])
         
+        # Qdrant: Relevanten Kontext für diese Kapitel holen
+        qdrant_context = qdrant_search(f"Kapitel {i} Kapitel {i+1} Übergang Charaktere", limit=3)
+        kontext_info = ""
+        for ctx in qdrant_context:
+            if ctx.get("type") in ["gliederung", "akt", "kapitel_gliederung"]:
+                kontext_info += f"[{ctx.get('type')}]: {ctx.get('content', '')[:500]}\n\n"
+        
         check = call_gemini(f"""Prüfe den Übergang zwischen zwei Kapiteln:
 
+═══════════════════════════════════════════════════════════════
+KONTEXT AUS QDRANT (Charaktere, Gliederung)
+═══════════════════════════════════════════════════════════════
+{kontext_info if kontext_info else "[Kein Kontext verfügbar]"}
+
+═══════════════════════════════════════════════════════════════
 ENDE KAPITEL {i}:
+═══════════════════════════════════════════════════════════════
 {prev_end}
 
+═══════════════════════════════════════════════════════════════
 ANFANG KAPITEL {i+1}:
+═══════════════════════════════════════════════════════════════
 {curr_start}
 
 Prüfe:
-1. Wissensstand-Konsistenz
-2. Emotionale Kontinuität
-3. Zeitliche Logik
-4. Fakten-Konsistenz (Namen, Orte)
+1. Wissensstand-Konsistenz (weiß eine Figur plötzlich etwas?)
+2. Emotionale Kontinuität (passt die Stimmung?)
+3. Zeitliche Logik (wie viel Zeit ist vergangen?)
+4. Fakten-Konsistenz (Namen, Orte, Beschreibungen)
+5. Charakter-Konsistenz (verhalten sich Figuren wie in Charakterbögen?)
 
 Antworte:
 - "OK" wenn alles passt
@@ -1273,9 +1380,27 @@ if __name__ == "__main__":
     import sys
     
     if len(sys.argv) < 2:
-        print("Usage: python novel_pipeline.py 'Setting-Beschreibung'")
-        print("Beispiel: python novel_pipeline.py 'Archäologin entdeckt auf Kreta ein Geheimnis'")
+        print("=== Novel Pipeline V4 ===")
+        print("")
+        print("Verwendung:")
+        print("  python novel_pipeline.py 'Setting'       - Direkt starten")
+        print("  python novel_pipeline.py --telegram      - Auf Telegram /start warten")
+        print("  python novel_pipeline.py --telegram 'Setting' - Setting vorbereiten, /start abwarten")
+        print("")
+        print("Beispiel:")
+        print("  python novel_pipeline.py 'Archäologin entdeckt auf Kreta ein Geheimnis'")
         sys.exit(1)
     
-    setting = " ".join(sys.argv[1:])
-    run_pipeline(setting)
+    if sys.argv[1] == "--telegram":
+        # Telegram-Modus: Warte auf /start
+        if len(sys.argv) > 2:
+            # Setting vorbereitet, warte auf Bestätigung
+            setting = telegram_wait_for_start(" ".join(sys.argv[2:]))
+        else:
+            # Warte auf /start <setting>
+            setting = telegram_wait_for_start()
+        run_pipeline(setting)
+    else:
+        # Direkter Start
+        setting = " ".join(sys.argv[1:])
+        run_pipeline(setting)
