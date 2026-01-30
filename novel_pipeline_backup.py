@@ -722,37 +722,15 @@ def phase2_5_kapitel(gliederung: str, akte: dict, output_dir: Path) -> list:
         for _, titel in matches:
             log(f"      [Kapitel {kapitel_nr}] {titel[:40]}...")
             
-            # Charaktere aus Gliederung extrahieren
-            charakter_section = ""
-            if "NEBENCHARAKTERE" in gliederung or "Nebencharaktere" in gliederung:
-                # Versuche Charakter-Sektion zu extrahieren
-                match = re.search(r'(##\s*3\.?\s*NEBENCHARAKTERE.*?)(?=##\s*4\.?\s*|##\s*DIE\s*7|$)', gliederung, re.DOTALL | re.IGNORECASE)
-                if match:
-                    charakter_section = match.group(1)[:3000]
-                else:
-                    # Fallback: Suche nach Charakternamen
-                    charakter_section = gliederung[:4000]
-            
             prompt = f"""{STIL}
 
-═══════════════════════════════════════════════════════════════
-ROMAN-KONTEXT (aus Phase 1)
-═══════════════════════════════════════════════════════════════
-{gliederung[:4000]}
+KONTEXT:
+{gliederung[:3000]}
 
-═══════════════════════════════════════════════════════════════
-CHARAKTERE (aus Gliederung - BEACHTEN!)
-═══════════════════════════════════════════════════════════════
-{charakter_section}
+AKT {akt_num}:
+{akt_text[:2000]}
 
-═══════════════════════════════════════════════════════════════
-AKT {akt_num} GLIEDERUNG
-═══════════════════════════════════════════════════════════════
-{akt_text[:2500]}
-
-═══════════════════════════════════════════════════════════════
 AUFGABE: DETAILLIERTE Szenen-Gliederung für KAPITEL {kapitel_nr}: {titel}
-═══════════════════════════════════════════════════════════════
 
 ## METADATEN
 - Nummer: {kapitel_nr}
@@ -762,24 +740,16 @@ AUFGABE: DETAILLIERTE Szenen-Gliederung für KAPITEL {kapitel_nr}: {titel}
 - Suspense-Level: [1/2/3]
 - Emotionaler Bogen: [Start] → [Ende]
 
-## FIGUREN IN DIESEM KAPITEL
-Liste ALLE Figuren die vorkommen mit:
-- Name
-- Rolle in dieser Szene
-- Ihr typisches Verhalten (aus Charakter-Beschreibung!)
-- Wie interagieren sie mit Heldin/Hero?
-
 ## SZENEN (3-5 pro Kapitel)
 
 ### Szene X: [Titel]
 - Ort: [KONKRET]
-- Anwesende Figuren: [Namen + was sie TUN]
+- Figuren: [Namen]
 - Ziel: [Was MUSS passieren?]
 - Beats:
   1. [Einstieg]
   2. [Entwicklung]  
   3. [Wendepunkt/Hook]
-- Charakter-Dynamik: [Wie verhalten sich die Figuren zueinander?]
 - Wichtige Momente: [Spezifische Dialoge/Aktionen]
 - Atmosphäre: [Stimmung]
 
@@ -789,7 +759,6 @@ Liste ALLE Figuren die vorkommen mit:
 
 ## CONSTRAINTS
 - Was darf NICHT passieren?
-- Welches Charakter-Verhalten wäre OOC (out of character)?
 """
             
             kap_gliederung = call_gemini(prompt, max_tokens=4000)
@@ -844,88 +813,60 @@ KRITIK + VOLLSTÄNDIG ÜBERARBEITETE Kapitel-Gliederung:""", max_tokens=4000)
 # PHASE 3: SCHREIBEN (Claude Code)
 # ============================================================
 
-def phase3_schreiben(kapitel: dict, vorheriges_kapitel: str, output_dir: Path, 
-                     roman_gliederung: str = "", akt_gliederung: str = "") -> str:
-    """Kapitel mit Claude Code schreiben - mit VOLLEM Kontext"""
+def phase3_schreiben(kapitel: dict, vorheriges_kapitel: str, output_dir: Path) -> str:
+    """Kapitel mit Claude Code schreiben"""
     
     nr = kapitel["nummer"]
     titel = kapitel["titel"]
-    kapitel_gliederung = kapitel["gliederung"]
+    gliederung = kapitel["gliederung"]
     
     # Wortzahl aus Gliederung
-    match = re.search(r'Wortzahl[:\s]*\[?(\d+)', kapitel_gliederung)
+    match = re.search(r'Wortzahl[:\s]*\[?(\d+)', gliederung)
     ziel_wortzahl = int(match.group(1)) if match else 3500
     
     log(f"\n   [Kapitel {nr}] Schreiben (Ziel: {ziel_wortzahl} Wörter)...")
     
-    # === 1. CHARAKTERE aus Gliederung extrahieren ===
-    charakter_section = ""
-    if roman_gliederung:
-        # Hauptcharaktere
-        match = re.search(r'(##\s*2\.?\s*HAUPTCHARAKTERE.*?)(?=##\s*3\.?|$)', roman_gliederung, re.DOTALL | re.IGNORECASE)
-        if match:
-            charakter_section += match.group(1)[:2000] + "\n\n"
-        
-        # Nebencharaktere
-        match = re.search(r'(##\s*3\.?\s*NEBENCHARAKTERE.*?)(?=##\s*4\.?|##\s*DIE\s*7|$)', roman_gliederung, re.DOTALL | re.IGNORECASE)
-        if match:
-            charakter_section += match.group(1)[:2500]
-    
-    # === 2. Vorheriges Kapitel (letzte 2000 Wörter) ===
-    prev_kontext = ""
+    # Kontext vom vorherigen Kapitel
+    kontext = ""
     if vorheriges_kapitel and nr > 1:
         worte = vorheriges_kapitel.split()
         if len(worte) > 2000:
-            prev_kontext = " ".join(worte[-2000:])
+            kontext = " ".join(worte[-2000:])
         else:
-            prev_kontext = vorheriges_kapitel
+            kontext = vorheriges_kapitel
+        
+        kontext = f"""
+=== ENDE KAPITEL {nr-1} (für Kontinuität) ===
+{kontext}
+=== ENDE KONTEXT ===
+"""
     
-    # === 3. Qdrant Kontext ===
-    qdrant_results = qdrant_search(f"Kapitel {nr} {titel}", limit=3)
-    qdrant_kontext = ""
-    for ctx in qdrant_results:
-        if ctx.get("type") in ["gliederung", "akt"]:
-            qdrant_kontext += f"[{ctx.get('type')}]: {ctx.get('content', '')[:800]}\n\n"
+    # Relevanten Kontext aus Qdrant holen
+    qdrant_context = qdrant_search(f"Kapitel {nr} {titel}", limit=2)
+    extra_context = ""
+    if qdrant_context:
+        extra_context = "\n\n=== ZUSÄTZLICHER KONTEXT ===\n"
+        for ctx in qdrant_context:
+            if ctx.get("type") == "kapitel_gliederung":
+                extra_context += f"[Gliederung Kap {ctx.get('kapitel')}]: {ctx.get('content', '')[:500]}...\n"
     
-    # === PROMPT AUFBAUEN ===
     prompt = f"""{STIL}
 
-═══════════════════════════════════════════════════════════════
-CHARAKTERE (WICHTIG - Verhalten beachten!)
-═══════════════════════════════════════════════════════════════
-{charakter_section if charakter_section else "[Keine Charakterdaten verfügbar]"}
+{kontext}
 
-═══════════════════════════════════════════════════════════════
-AKT-GLIEDERUNG (Überblick)
-═══════════════════════════════════════════════════════════════
-{akt_gliederung[:2000] if akt_gliederung else "[Keine Akt-Gliederung]"}
+{extra_context}
 
-═══════════════════════════════════════════════════════════════
-KAPITEL-GLIEDERUNG (folge EXAKT!)
-═══════════════════════════════════════════════════════════════
-{kapitel_gliederung}
+Du schreibst KAPITEL {nr}: {titel}
 
-═══════════════════════════════════════════════════════════════
-VORHERIGES KAPITEL (letzte Passage - für Kontinuität)
-═══════════════════════════════════════════════════════════════
-{prev_kontext if prev_kontext else "[Erstes Kapitel]"}
-
-═══════════════════════════════════════════════════════════════
-ZUSÄTZLICHER KONTEXT (aus Qdrant)
-═══════════════════════════════════════════════════════════════
-{qdrant_kontext if qdrant_kontext else "[Kein zusätzlicher Kontext]"}
-
-═══════════════════════════════════════════════════════════════
-AUFGABE: Schreibe KAPITEL {nr}: {titel}
-═══════════════════════════════════════════════════════════════
+GLIEDERUNG (folge ihr EXAKT):
+{gliederung}
 
 REGELN:
 - Exakt {ziel_wortzahl} Wörter (±10%)
-- Folge den Szenen und Beats aus der Kapitel-Gliederung GENAU
-- Charaktere verhalten sich wie in den Charakterbögen beschrieben!
-- Single POV (Heldin, dritte Person)
-- Gedanken der Heldin: Ich-Form, KURSIV (*Gedanke*)
+- Folge den Szenen und Beats GENAU
+- Single POV (Heldin)
 - Dialoge: schlagfertig, mit Subtext
+- Gedanken der Heldin: direkt, selbstironisch
 - Ende mit Hook oder emotionalem Beat
 - KEINE Meta-Kommentare, beginne DIREKT mit dem Text
 
@@ -942,13 +883,10 @@ BEGINNE JETZT:"""
         
         anreicherung = f"""{STIL}
 
-CHARAKTERE:
-{charakter_section[:1500] if charakter_section else ""}
-
 Der Text hat {wortzahl} Wörter, Ziel: {ziel_wortzahl}
 
 NICHT aufblähen! Stattdessen BEREICHERN durch:
-- Mehr Spannung zwischen den Charakteren (gemäß ihren Persönlichkeiten!)
+- Mehr Spannung zwischen den Charakteren
 - Ein weiteres Wortgefecht
 - Tiefere emotionale Beats
 - Eine Komplikation
@@ -1200,17 +1138,7 @@ def run_pipeline(setting: str, output_dir: str = None):
     vorheriges = None
     
     for kap in kapitel_liste:
-        # Akt-Gliederung für dieses Kapitel bestimmen
-        kap_akt = kap.get("akt", 1)
-        akt_gliederung = akte.get(f"akt_{kap_akt}", "")
-        
-        text = phase3_schreiben(
-            kapitel=kap, 
-            vorheriges_kapitel=vorheriges, 
-            output_dir=output_path,
-            roman_gliederung=gliederung,
-            akt_gliederung=akt_gliederung
-        )
+        text = phase3_schreiben(kap, vorheriges, output_path)
         polished = phase4_polish(text, kap["nummer"], output_path)
         
         all_chapters.append(polished)
