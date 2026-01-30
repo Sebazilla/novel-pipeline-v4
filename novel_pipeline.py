@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
 Novel Pipeline V4
-- Gemini für alle Planungs-Phasen (Self-Feedback)
+- Gemini 3 Pro für Planung + Self-Critique (ersetzt GPT)
 - Claude Code CLI für Schreiben
-- Telegram Approvals
-- Läuft auf Mac Studio
+- Qdrant für Kontext-Speicherung
+- Telegram Approvals an Checkpoints
+- Versioniertes Speichern (jede Iteration)
 """
 
 import os
@@ -12,18 +13,49 @@ import subprocess
 import requests
 import re
 import time
+import json
+import hashlib
 from datetime import datetime
 from pathlib import Path
-from dotenv import load_dotenv
+from typing import Optional, List, Dict
 
-# Secrets aus .env laden
-load_dotenv()
+# ============================================================
+# CONFIG
+# ============================================================
 
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+# Aus .env oder Environment
+def load_env():
+    env_path = Path(__file__).parent / ".env"
+    if env_path.exists():
+        for line in env_path.read_text().splitlines():
+            if "=" in line and not line.startswith("#"):
+                k, v = line.split("=", 1)
+                os.environ.setdefault(k.strip(), v.strip())
 
-GEMINI_MODEL = "gemini-2.5-pro"  # Aktuellstes Modell
+load_env()
+
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
+TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
+QDRANT_URL = os.environ.get("QDRANT_URL", "http://localhost:6333")
+
+GEMINI_MODEL = "gemini-3-pro-preview"
+
+# ============================================================
+# LOGGING
+# ============================================================
+
+LOG_FILE = None
+
+def log(message: str, also_print: bool = True):
+    """Log to file and optionally print"""
+    timestamp = datetime.now().strftime("%H:%M:%S")
+    line = f"[{timestamp}] {message}"
+    if also_print:
+        print(line)
+    if LOG_FILE:
+        with open(LOG_FILE, "a") as f:
+            f.write(line + "\n")
 
 # ============================================================
 # API CALLS
@@ -43,7 +75,7 @@ def call_gemini(prompt: str, max_tokens: int = 16000, retries: int = 3) -> str:
             data = response.json()
             
             if "candidates" not in data:
-                print(f"    ⚠️ Gemini Response ohne candidates: {data.get('error', data)}")
+                log(f"    ⚠️ Gemini Response ohne candidates: {data.get('error', data)}")
                 if attempt < retries - 1:
                     time.sleep(5 * (attempt + 1))
                     continue
@@ -52,7 +84,7 @@ def call_gemini(prompt: str, max_tokens: int = 16000, retries: int = 3) -> str:
             content = data["candidates"][0].get("content", {})
             if not content or "parts" not in content:
                 finish = data["candidates"][0].get("finishReason", "unknown")
-                print(f"    ⚠️ Gemini empty response (finishReason: {finish})")
+                log(f"    ⚠️ Gemini empty response (finishReason: {finish})")
                 if attempt < retries - 1:
                     time.sleep(5 * (attempt + 1))
                     continue
@@ -60,7 +92,7 @@ def call_gemini(prompt: str, max_tokens: int = 16000, retries: int = 3) -> str:
             return content["parts"][0]["text"]
             
         except Exception as e:
-            print(f"    ⚠️ Gemini Fehler (Versuch {attempt + 1}): {e}")
+            log(f"    ⚠️ Gemini Fehler (Versuch {attempt + 1}): {e}")
             if attempt < retries - 1:
                 time.sleep(5 * (attempt + 1))
     return ""
@@ -77,25 +109,31 @@ def call_claude(prompt: str, timeout: int = 600) -> str:
         )
         return result.stdout
     except subprocess.TimeoutExpired:
-        print("    ⚠️ Claude Timeout")
+        log("    ⚠️ Claude Timeout")
         return ""
     except Exception as e:
-        print(f"    ⚠️ Claude Fehler: {e}")
+        log(f"    ⚠️ Claude Fehler: {e}")
         return ""
 
+
+# ============================================================
+# TELEGRAM
+# ============================================================
 
 def telegram_send(message: str) -> bool:
     """Nachricht an Telegram senden"""
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     try:
+        # Markdown escapen für Telegram
+        text = message[:4000]  # Telegram Limit
         requests.post(url, json={
             "chat_id": TELEGRAM_CHAT_ID,
-            "text": message,
+            "text": text,
             "parse_mode": "Markdown"
         }, timeout=30)
         return True
     except Exception as e:
-        print(f"    ⚠️ Telegram Fehler: {e}")
+        log(f"    ⚠️ Telegram Fehler: {e}")
         return False
 
 
@@ -103,34 +141,141 @@ def telegram_approval(message: str, timeout_minutes: int = 60) -> bool:
     """Telegram Approval mit JA/NEIN Antwort"""
     telegram_send(message + "\n\n✅ JA = weiter\n❌ NEIN = neu generieren")
     
-    print(f"      📱 Warte auf Approval (max {timeout_minutes} min)...")
+    log(f"      📱 Warte auf Approval (max {timeout_minutes} min)...")
     
     # Letzte Update-ID merken
-    updates = requests.get(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getUpdates").json()
-    last_update_id = updates["result"][-1]["update_id"] if updates["result"] else 0
+    try:
+        updates = requests.get(
+            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getUpdates",
+            timeout=10
+        ).json()
+        last_update_id = updates["result"][-1]["update_id"] if updates.get("result") else 0
+    except:
+        last_update_id = 0
     
     start_time = time.time()
     while time.time() - start_time < timeout_minutes * 60:
         time.sleep(3)
         
-        updates = requests.get(
-            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getUpdates",
-            params={"offset": last_update_id + 1}
-        ).json()
-        
-        for update in updates.get("result", []):
-            last_update_id = update["update_id"]
-            text = update.get("message", {}).get("text", "").lower().strip()
+        try:
+            updates = requests.get(
+                f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getUpdates",
+                params={"offset": last_update_id + 1},
+                timeout=10
+            ).json()
             
-            if text in ["ja", "yes", "j", "y", "ok", "👍"]:
-                print(f"      ✅ Approved!")
-                return True
-            elif text in ["nein", "no", "n", "👎"]:
-                print(f"      ❌ Abgelehnt")
-                return False
+            for update in updates.get("result", []):
+                last_update_id = update["update_id"]
+                text = update.get("message", {}).get("text", "").lower().strip()
+                
+                if text in ["ja", "yes", "j", "y", "ok", "👍"]:
+                    log(f"      ✅ Approved!")
+                    return True
+                elif text in ["nein", "no", "n", "👎"]:
+                    log(f"      ❌ Abgelehnt")
+                    return False
+        except:
+            continue
     
-    print(f"      ⏰ Timeout - fahre fort")
+    log(f"      ⏰ Timeout - fahre fort")
     return True
+
+
+# ============================================================
+# QDRANT (Vektor-Speicher)
+# ============================================================
+
+def qdrant_init_collection(collection_name: str = "novel"):
+    """Qdrant Collection erstellen falls nicht existiert"""
+    try:
+        # Prüfen ob Collection existiert
+        r = requests.get(f"{QDRANT_URL}/collections/{collection_name}", timeout=5)
+        if r.status_code == 200:
+            return True
+        
+        # Erstellen
+        requests.put(f"{QDRANT_URL}/collections/{collection_name}", json={
+            "vectors": {
+                "size": 384,  # Für all-MiniLM-L6-v2
+                "distance": "Cosine"
+            }
+        }, timeout=10)
+        log(f"   ✓ Qdrant Collection '{collection_name}' erstellt")
+        return True
+    except Exception as e:
+        log(f"   ⚠️ Qdrant nicht erreichbar: {e}")
+        return False
+
+
+def qdrant_store(content: str, metadata: dict, collection: str = "novel"):
+    """Text in Qdrant speichern (mit einfachem Hash als "Embedding")"""
+    try:
+        # Einfaches "Embedding" via Hash (für Demo - später echte Embeddings)
+        content_hash = hashlib.md5(content.encode()).hexdigest()
+        vector = [float(int(content_hash[i:i+2], 16)) / 255.0 for i in range(0, 32, 2)] * 24
+        vector = vector[:384]
+        
+        point_id = int(hashlib.md5(json.dumps(metadata, sort_keys=True).encode()).hexdigest()[:8], 16)
+        
+        requests.put(f"{QDRANT_URL}/collections/{collection}/points", json={
+            "points": [{
+                "id": point_id,
+                "vector": vector,
+                "payload": {
+                    "content": content[:10000],  # Limit
+                    **metadata
+                }
+            }]
+        }, timeout=10)
+        return True
+    except Exception as e:
+        log(f"   ⚠️ Qdrant Store Fehler: {e}")
+        return False
+
+
+def qdrant_search(query: str, collection: str = "novel", limit: int = 5) -> List[dict]:
+    """In Qdrant suchen"""
+    try:
+        # Einfaches "Embedding" via Hash
+        query_hash = hashlib.md5(query.encode()).hexdigest()
+        vector = [float(int(query_hash[i:i+2], 16)) / 255.0 for i in range(0, 32, 2)] * 24
+        vector = vector[:384]
+        
+        r = requests.post(f"{QDRANT_URL}/collections/{collection}/points/search", json={
+            "vector": vector,
+            "limit": limit,
+            "with_payload": True
+        }, timeout=10)
+        
+        if r.status_code == 200:
+            return [hit["payload"] for hit in r.json().get("result", [])]
+        return []
+    except:
+        return []
+
+
+# ============================================================
+# VERSIONIERTES SPEICHERN
+# ============================================================
+
+def save_versioned(output_dir: Path, filename: str, content: str, iteration: int = None):
+    """Speichert mit Versionierung - überschreibt nichts"""
+    base = filename.rsplit(".", 1)[0]
+    ext = filename.rsplit(".", 1)[1] if "." in filename else "md"
+    
+    if iteration is not None:
+        versioned_name = f"{base}_v{iteration:02d}.{ext}"
+    else:
+        versioned_name = filename
+    
+    filepath = output_dir / versioned_name
+    filepath.write_text(content, encoding="utf-8")
+    
+    # Auch immer die "aktuelle" Version speichern
+    current = output_dir / filename
+    current.write_text(content, encoding="utf-8")
+    
+    return filepath
 
 
 # ============================================================
@@ -238,11 +383,11 @@ TECHNISCHE VORGABEN
 - Kapitel enden mit Hook oder emotionalem Beat
 """
 
-STIL = """SCHREIBSTIL:
+STIL = """SCHREIBSTIL (Nora Roberts Style):
 
 PACING:
-- Schnell - kurze Kapitel, häufige Szenenwechsel
-- Jedes Kapitel endet mit Hook
+- SCHNELL - kurze Kapitel, häufige Szenenwechsel
+- Jedes Kapitel endet mit Hook oder emotionalem Moment
 - Action und Dialog dominieren, minimale Beschreibungen
 
 DIALOGE:
@@ -251,9 +396,14 @@ DIALOGE:
 - Necken, provozieren, herausfordern
 
 INNENLEBEN:
-- Gedanken der Heldin: direkt, selbstironisch
-- Körperliche Reaktionen beschreiben
+- Gedanken der Protagonistin: direkt, selbstironisch, ehrlich
+- Körperliche Reaktionen beschreiben (Herzklopfen, trockener Mund)
 - Sie kommentiert ihre eigene Dummheit
+
+EROTIK:
+- Aufbauende Spannung > explizite Szenen
+- Fast-Küsse, unterbrochene Momente
+- Wenn es passiert: sinnlich aber nicht vulgär
 
 TON:
 - Warm, humorvoll, emotional
@@ -261,25 +411,23 @@ TON:
 - Der Leser soll lachen UND mitfiebern
 """
 
+SELF_CRITIQUE_PROMPT = """
+═══════════════════════════════════════════════════════════════
+KRITISCHE SELBST-PRÜFUNG
+═══════════════════════════════════════════════════════════════
 
-# ============================================================
-# SELF-FEEDBACK PROMPT
-# ============================================================
+WICHTIG: Schreib mir NICHT was ich hören möchte.
+Schreib was SINN MACHT.
 
-SELF_FEEDBACK_INSTRUCTION = """
-WICHTIG - EHRLICHES SELF-FEEDBACK:
-Bevor du antwortest, prüfe deine Arbeit kritisch:
-- Schreib mir NICHT was ich hören möchte
-- Schreib was SINN MACHT
-- Wenn etwas schwach ist, verbessere es
-- Wenn die Struktur nicht stimmt, korrigiere sie
-- Sei dein eigener härtester Kritiker
+Prüfe deine Arbeit SCHONUNGSLOS:
+1. Ist das WIRKLICH gut oder nur "okay"?
+2. Wo sind die SCHWACHEN Stellen?
+3. Was würde ein erfahrener Lektor kritisieren?
+4. Folgt es der 7-Phasen-Struktur EXAKT?
+5. Ist die Suspense-Eskalation SICHTBAR?
+6. Würdest DU das lesen wollen?
 
-Frage dich:
-1. Folgt das WIRKLICH der 7-Phasen-Struktur?
-2. Ist die Suspense-Eskalation sichtbar?
-3. Würde ich das selbst lesen wollen?
-4. Wo sind die schwachen Stellen?
+Sei EHRLICH. Sei KRITISCH. Dann VERBESSERE.
 """
 
 
@@ -287,97 +435,75 @@ Frage dich:
 # PHASE 1: GROB-GLIEDERUNG
 # ============================================================
 
-def phase1_gliederung(setting: str, max_iterations: int = 5) -> str:
-    """Grob-Gliederung mit Gemini Self-Feedback"""
+def phase1_gliederung(setting: str, output_dir: Path, iterations: int = 3) -> str:
+    """Grob-Gliederung mit Gemini Self-Critique"""
     
-    print(f"\n{'='*60}")
-    print("PHASE 1: GROB-GLIEDERUNG")
-    print(f"{'='*60}")
+    log(f"\n{'='*60}")
+    log("PHASE 1: GROB-GLIEDERUNG")
+    log(f"{'='*60}")
+    
+    telegram_send(f"🚀 *Phase 1 gestartet*\n\nSetting: {setting}")
     
     prompt = f"""{REGELWERK}
 
 {STIL}
 
-{SELF_FEEDBACK_INSTRUCTION}
+Setting: {setting}
 
-SETTING: {setting}
-
-AUFGABE:
-Erstelle eine detaillierte Gliederung für diesen Roman.
+AUFGABE: Erstelle eine DETAILLIERTE Gliederung für diesen Roman.
 
 Die Gliederung MUSS enthalten:
 1. Titel-Vorschlag
-2. Heldin (Name, Alter, Beruf, Ziel, Schwäche)
+2. Heldin (Name, Alter, Beruf, Ziel, innerer Konflikt, Schwäche)
 3. Hero (Name, Beruf, Geheimnis, was macht ihn zum "Feind"?)
-4. Antagonist (Wer, Motiv, Verbindung zu Leads)
-5. 3+ Nebencharaktere (Archetyp + Funktion)
-6. Die 7 Phasen mit je:
-   - Welche Kapitel
-   - Kernszenen
-   - Suspense-Level
-   - Emotionaler Beat
-7. Der äußere Konflikt/Bedrohung (konkret!)
+4. Antagonist (Wer, Motiv, persönliche Verbindung zu Leads)
+5. 3+ Nebencharaktere (Archetyp + konkrete Funktion in der Story)
+6. Die 7 PHASEN mit je:
+   - Welche Kapitel (Nummern!)
+   - Kernszenen (konkret!)
+   - Suspense-Level (1/2/3)
+   - Emotionaler Beat am Ende
+7. Der äußere Konflikt/Bedrohung (KONKRET, nicht vage!)
 
 PRÜFE VOR DER AUSGABE:
 - Stimmen die Proportionen (15% / 20% / 20% / 20% / 10% / 10% / 5%)?
-- Eskaliert die Suspense parallel zur Romanze?
-- Hat jede Phase einen klaren Höhepunkt?
+- Eskaliert die Suspense PARALLEL zur Romanze?
+- Hat jede Phase einen KLAREN Höhepunkt?
 """
 
     gliederung = call_gemini(prompt, max_tokens=12000)
-    print(f"   ✓ Erste Version ({len(gliederung)} Zeichen)")
+    log(f"   ✓ Erste Version ({len(gliederung)} Zeichen)")
+    save_versioned(output_dir, "01_gliederung.md", gliederung, iteration=1)
     
-    # Self-Feedback Loop
-    for i in range(max_iterations - 1):
-        print(f"\n   [Iteration {i+2}/{max_iterations}] Self-Feedback...")
+    # Self-Critique Loop
+    for i in range(iterations):
+        log(f"\n   [Iteration {i+2}/{iterations+1}] Self-Critique...")
         
-        feedback_prompt = f"""{SELF_FEEDBACK_INSTRUCTION}
+        critique_prompt = f"""{SELF_CRITIQUE_PROMPT}
 
-Hier ist deine aktuelle Roman-Gliederung:
+Hier ist die aktuelle Roman-Gliederung:
 
 {gliederung}
 
-AUFGABE - KRITISCHE SELBST-PRÜFUNG:
+AUFGABE:
+1. KRITISIERE diese Gliederung SCHONUNGSLOS
+2. Liste KONKRETE Schwächen auf
+3. Dann: Gib die VOLLSTÄNDIG ÜBERARBEITETE Gliederung aus
 
-1. STRUKTUR-CHECK:
-   - Entspricht jede Phase EXAKT den Vorgaben?
-   - Sind die Proportionen korrekt?
-   - Fehlen wichtige Beats?
-
-2. SUSPENSE-CHECK:
-   - Eskaliert die äußere Bedrohung in 3 Stufen?
-   - Ist der Antagonist früh genug präsent?
-   - Gibt es echte Gefahr oder nur Andeutungen?
-
-3. ROMANCE-CHECK:
-   - Ist die Enemies-to-Lovers Dynamik glaubwürdig?
-   - Kommen die Leads früh genug zusammen?
-   - Ist der Midpoint-Sex emotional aufgeladen?
-
-4. CHARACTER-CHECK:
-   - Sind die Nebencharaktere mehr als Platzhalter?
-   - Hat der Antagonist ein echtes Motiv?
-   - Ist die Heldin AKTIV (nicht nur reaktiv)?
-
-SCHREIB EHRLICH:
-- Was ist SCHWACH an dieser Gliederung?
-- Was würde ein Lektor kritisieren?
-- Was fehlt?
-
-Dann: Gib die VOLLSTÄNDIG ÜBERARBEITETE Gliederung aus.
-Nicht nur die Änderungen - die KOMPLETTE neue Version.
+Die überarbeitete Version muss KOMPLETT sein - nicht nur die Änderungen!
 """
         
-        verbessert = call_gemini(feedback_prompt, max_tokens=12000)
+        verbessert = call_gemini(critique_prompt, max_tokens=12000)
         
-        if len(verbessert) > len(gliederung) * 0.5:  # Sanity check
+        if len(verbessert) > len(gliederung) * 0.5:
             gliederung = verbessert
-            print(f"   ✓ Überarbeitet ({len(gliederung)} Zeichen)")
+            log(f"   ✓ Überarbeitet ({len(gliederung)} Zeichen)")
+            save_versioned(output_dir, "01_gliederung.md", gliederung, iteration=i+2)
         else:
-            print(f"   ⚠️ Überarbeitung zu kurz, behalte vorherige Version")
+            log(f"   ⚠️ Überarbeitung zu kurz, behalte vorherige Version")
     
-    # Telegram Approval
-    print(f"\n   📱 Sende zur Freigabe...")
+    # TELEGRAM APPROVAL
+    log(f"\n   📱 Sende Synopsis zur Freigabe...")
     
     synopsis_prompt = f"""Fasse diese Gliederung in einer SPANNENDEN Synopsis zusammen (max 800 Zeichen):
 
@@ -387,20 +513,39 @@ Enthalten muss:
 - Heldin + Hero (Namen!)
 - Der zentrale Konflikt
 - Was ist der Hook?
-- Warum will man das lesen?
 
 NUR die Synopsis, keine Einleitung."""
 
     synopsis = call_gemini(synopsis_prompt, max_tokens=500)
     
-    for attempt in range(3):
-        approved = telegram_approval(f"📖 *ROMAN-SYNOPSIS*\n\n{synopsis[:1500]}")
+    max_attempts = 5
+    for attempt in range(max_attempts):
+        approved = telegram_approval(
+            f"📖 *SYNOPSIS* (Versuch {attempt+1}/{max_attempts}):\n\n{synopsis[:1500]}"
+        )
+        
         if approved:
+            # In Qdrant speichern (erst nach Approval!)
+            qdrant_store(gliederung, {
+                "type": "gliederung",
+                "phase": 1,
+                "setting": setting,
+                "approved": True
+            })
             break
-        print(f"   🔄 Generiere neue Version...")
-        gliederung = call_gemini(prompt, max_tokens=12000)
-        synopsis = call_gemini(synopsis_prompt, max_tokens=500)
+        else:
+            log(f"   🔄 Generiere neue Version...")
+            gliederung = call_gemini(prompt, max_tokens=12000)
+            for j in range(iterations):
+                critique_prompt = f"""{SELF_CRITIQUE_PROMPT}\n\n{gliederung}\n\nVOLLSTÄNDIG ÜBERARBEITETE Gliederung:"""
+                gliederung = call_gemini(critique_prompt, max_tokens=12000)
+            synopsis = call_gemini(synopsis_prompt, max_tokens=500)
+            save_versioned(output_dir, "01_gliederung.md", gliederung, iteration=attempt+iterations+2)
     
+    # Finale Version speichern
+    save_versioned(output_dir, "01_gliederung.md", gliederung)
+    
+    log(f"\n✓ Phase 1 abgeschlossen!")
     return gliederung
 
 
@@ -408,15 +553,16 @@ NUR die Synopsis, keine Einleitung."""
 # PHASE 2: AKT-GLIEDERUNGEN
 # ============================================================
 
-def phase2_akte(gliederung: str) -> dict:
-    """Detaillierte Akt-Gliederungen"""
+def phase2_akte(gliederung: str, output_dir: Path) -> dict:
+    """Detaillierte Akt-Gliederungen mit Self-Critique"""
     
-    print(f"\n{'='*60}")
-    print("PHASE 2: AKT-GLIEDERUNGEN")
-    print(f"{'='*60}")
+    log(f"\n{'='*60}")
+    log("PHASE 2: AKT-GLIEDERUNGEN")
+    log(f"{'='*60}")
+    
+    telegram_send("📋 *Phase 2 gestartet*: Akt-Gliederungen")
     
     akte = {}
-    
     akt_phasen = {
         1: "Phase I + II (0-35%): Setup + Forced Proximity",
         2: "Phase III + IV (35-75%): Intimacy + Separation", 
@@ -424,11 +570,9 @@ def phase2_akte(gliederung: str) -> dict:
     }
     
     for akt_num, beschreibung in akt_phasen.items():
-        print(f"\n   [Akt {akt_num}] {beschreibung}")
+        log(f"\n   [Akt {akt_num}] {beschreibung}")
         
         prompt = f"""{REGELWERK}
-
-{SELF_FEEDBACK_INSTRUCTION}
 
 GESAMT-GLIEDERUNG:
 {gliederung}
@@ -440,38 +584,35 @@ Für JEDES Kapitel in diesem Akt:
 1. Kapitel-Nummer und Titel
 2. Welche Phase(n) der 7-Phasen-Struktur
 3. Suspense-Level (1/2/3)
-4. Kernszenen (2-4 pro Kapitel)
+4. Kernszenen (2-4 pro Kapitel, KONKRET!)
 5. Emotionaler Beat am Ende
-6. Wortzahl-Ziel (Gesamt ~80.000 Wörter)
-
-PRÜFE:
-- Sind alle Phasen dieses Akts abgedeckt?
-- Stimmt die Suspense-Eskalation?
-- Endet jedes Kapitel mit Hook?
+6. Wortzahl-Ziel (Gesamt ~80.000 Wörter, 18-22 Kapitel)
 """
         
         akt = call_gemini(prompt, max_tokens=8000)
-        print(f"      ✓ Erstellt ({len(akt)} Zeichen)")
+        log(f"      ✓ Erstellt ({len(akt)} Zeichen)")
+        save_versioned(output_dir, f"02_akt_{akt_num}.md", akt, iteration=1)
         
-        # Self-Feedback
-        feedback = call_gemini(f"""{SELF_FEEDBACK_INSTRUCTION}
+        # Self-Critique
+        critique = call_gemini(f"""{SELF_CRITIQUE_PROMPT}
 
 Akt {akt_num} Gliederung:
 {akt}
 
-Kritische Prüfung:
-1. Fehlen wichtige Szenen?
-2. Ist die Kapitel-Aufteilung logisch?
-3. Stimmt das Pacing?
-
-Gib die VOLLSTÄNDIGE überarbeitete Akt-Gliederung aus.""", max_tokens=8000)
+KRITIK + VOLLSTÄNDIG ÜBERARBEITETE Akt-Gliederung:""", max_tokens=8000)
         
-        if len(feedback) > len(akt) * 0.5:
-            akt = feedback
-            print(f"      ✓ Überarbeitet")
+        if len(critique) > len(akt) * 0.5:
+            akt = critique
+            log(f"      ✓ Überarbeitet")
+            save_versioned(output_dir, f"02_akt_{akt_num}.md", akt, iteration=2)
         
         akte[f"akt_{akt_num}"] = akt
+        save_versioned(output_dir, f"02_akt_{akt_num}.md", akt)
+        
+        # In Qdrant
+        qdrant_store(akt, {"type": "akt", "akt_num": akt_num})
     
+    log(f"\n✓ Phase 2 abgeschlossen!")
     return akte
 
 
@@ -479,31 +620,32 @@ Gib die VOLLSTÄNDIGE überarbeitete Akt-Gliederung aus.""", max_tokens=8000)
 # PHASE 2.5: KAPITEL-GLIEDERUNGEN  
 # ============================================================
 
-def phase2_5_kapitel(gliederung: str, akte: dict) -> list:
+def phase2_5_kapitel(gliederung: str, akte: dict, output_dir: Path) -> list:
     """Detaillierte Szenen-Gliederung pro Kapitel"""
     
-    print(f"\n{'='*60}")
-    print("PHASE 2.5: KAPITEL-GLIEDERUNGEN")
-    print(f"{'='*60}")
+    log(f"\n{'='*60}")
+    log("PHASE 2.5: KAPITEL-GLIEDERUNGEN")
+    log(f"{'='*60}")
+    
+    telegram_send("📝 *Phase 2.5 gestartet*: Kapitel-Gliederungen")
     
     kapitel_liste = []
     kapitel_nr = 1
     
     for akt_num in [1, 2, 3]:
-        print(f"\n   [Akt {akt_num}]")
+        log(f"\n   [Akt {akt_num}]")
         akt_text = akte[f"akt_{akt_num}"]
         
         # Kapitel aus Akt extrahieren
         matches = re.findall(r'Kapitel\s*(\d+)[:\s]*([^\n]+)', akt_text, re.IGNORECASE)
         if not matches:
-            matches = [(str(i), f"Kapitel {i}") for i in range(1, 8)]
+            # Fallback: Schätze 6-7 Kapitel pro Akt
+            matches = [(str(kapitel_nr + i), f"Kapitel {kapitel_nr + i}") for i in range(7)]
         
         for _, titel in matches:
-            print(f"      [Kapitel {kapitel_nr}] {titel[:40]}...")
+            log(f"      [Kapitel {kapitel_nr}] {titel[:40]}...")
             
             prompt = f"""{STIL}
-
-{SELF_FEEDBACK_INSTRUCTION}
 
 KONTEXT:
 {gliederung[:3000]}
@@ -511,7 +653,7 @@ KONTEXT:
 AKT {akt_num}:
 {akt_text[:2000]}
 
-AUFGABE: Szenen-Gliederung für KAPITEL {kapitel_nr}: {titel}
+AUFGABE: DETAILLIERTE Szenen-Gliederung für KAPITEL {kapitel_nr}: {titel}
 
 ## METADATEN
 - Nummer: {kapitel_nr}
@@ -519,20 +661,20 @@ AUFGABE: Szenen-Gliederung für KAPITEL {kapitel_nr}: {titel}
 - Wortzahl: [3000-4000]
 - Phase: [Welche der 7 Phasen?]
 - Suspense-Level: [1/2/3]
+- Emotionaler Bogen: [Start] → [Ende]
 
 ## SZENEN (3-5 pro Kapitel)
 
-Für jede Szene:
 ### Szene X: [Titel]
-- Ort: [konkret]
-- Figuren: [wer ist anwesend]
-- Ziel: [was muss passieren]
+- Ort: [KONKRET]
+- Figuren: [Namen]
+- Ziel: [Was MUSS passieren?]
 - Beats:
   1. [Einstieg]
   2. [Entwicklung]  
   3. [Wendepunkt/Hook]
-- Wichtige Momente: [spezifische Dialoge/Aktionen]
-- Stimmung: [Atmosphäre]
+- Wichtige Momente: [Spezifische Dialoge/Aktionen]
+- Atmosphäre: [Stimmung]
 
 ## VERBINDUNGEN
 - Anknüpfung an Kapitel {kapitel_nr - 1}
@@ -543,7 +685,21 @@ Für jede Szene:
 """
             
             kap_gliederung = call_gemini(prompt, max_tokens=4000)
-            print(f"         ✓ Erstellt")
+            save_versioned(output_dir, f"02.5_kapitel_{kapitel_nr:02d}_gliederung.md", kap_gliederung, iteration=1)
+            
+            # Self-Critique
+            improved = call_gemini(f"""{SELF_CRITIQUE_PROMPT}
+
+Kapitel-Gliederung:
+{kap_gliederung}
+
+KRITIK + VOLLSTÄNDIG ÜBERARBEITETE Kapitel-Gliederung:""", max_tokens=4000)
+            
+            if len(improved) > len(kap_gliederung) * 0.5:
+                kap_gliederung = improved
+                save_versioned(output_dir, f"02.5_kapitel_{kapitel_nr:02d}_gliederung.md", kap_gliederung, iteration=2)
+            
+            log(f"         ✓ Erstellt ({len(kap_gliederung)} Zeichen)")
             
             kapitel_liste.append({
                 "nummer": kapitel_nr,
@@ -552,10 +708,18 @@ Für jede Szene:
                 "gliederung": kap_gliederung
             })
             
+            # In Qdrant
+            qdrant_store(kap_gliederung, {
+                "type": "kapitel_gliederung",
+                "kapitel": kapitel_nr,
+                "akt": akt_num
+            })
+            
+            save_versioned(output_dir, f"02.5_kapitel_{kapitel_nr:02d}_gliederung.md", kap_gliederung)
             kapitel_nr += 1
     
-    # Telegram Approval für alle Kapitel-Gliederungen
-    print(f"\n   📱 Sende Kapitel-Übersicht zur Freigabe...")
+    # TELEGRAM APPROVAL für Kapitel-Struktur
+    log(f"\n   📱 Sende Kapitel-Übersicht zur Freigabe...")
     
     uebersicht = "\n".join([
         f"Kap {k['nummer']}: {k['titel'][:50]}" 
@@ -564,6 +728,7 @@ Für jede Szene:
     
     telegram_approval(f"📚 *KAPITEL-STRUKTUR*\n\n{uebersicht[:1500]}\n\n*{len(kapitel_liste)} Kapitel total*")
     
+    log(f"\n✓ Phase 2.5 abgeschlossen! {len(kapitel_liste)} Kapitel")
     return kapitel_liste
 
 
@@ -571,23 +736,22 @@ Für jede Szene:
 # PHASE 3: SCHREIBEN (Claude Code)
 # ============================================================
 
-def phase3_schreiben(kapitel: dict, vorheriges_kapitel: str = None) -> str:
+def phase3_schreiben(kapitel: dict, vorheriges_kapitel: str, output_dir: Path) -> str:
     """Kapitel mit Claude Code schreiben"""
     
     nr = kapitel["nummer"]
     titel = kapitel["titel"]
     gliederung = kapitel["gliederung"]
     
-    # Wortzahl aus Gliederung extrahieren
-    match = re.search(r'Wortzahl[:\s]*(\d+)', gliederung)
+    # Wortzahl aus Gliederung
+    match = re.search(r'Wortzahl[:\s]*\[?(\d+)', gliederung)
     ziel_wortzahl = int(match.group(1)) if match else 3500
     
-    print(f"\n   [Kapitel {nr}] Schreiben (Ziel: {ziel_wortzahl} Wörter)...")
+    log(f"\n   [Kapitel {nr}] Schreiben (Ziel: {ziel_wortzahl} Wörter)...")
     
     # Kontext vom vorherigen Kapitel
     kontext = ""
     if vorheriges_kapitel and nr > 1:
-        # Nur die letzten ~2000 Wörter für Kontinuität
         worte = vorheriges_kapitel.split()
         if len(worte) > 2000:
             kontext = " ".join(worte[-2000:])
@@ -600,9 +764,20 @@ def phase3_schreiben(kapitel: dict, vorheriges_kapitel: str = None) -> str:
 === ENDE KONTEXT ===
 """
     
+    # Relevanten Kontext aus Qdrant holen
+    qdrant_context = qdrant_search(f"Kapitel {nr} {titel}", limit=2)
+    extra_context = ""
+    if qdrant_context:
+        extra_context = "\n\n=== ZUSÄTZLICHER KONTEXT ===\n"
+        for ctx in qdrant_context:
+            if ctx.get("type") == "kapitel_gliederung":
+                extra_context += f"[Gliederung Kap {ctx.get('kapitel')}]: {ctx.get('content', '')[:500]}...\n"
+    
     prompt = f"""{STIL}
 
 {kontext}
+
+{extra_context}
 
 Du schreibst KAPITEL {nr}: {titel}
 
@@ -611,21 +786,23 @@ GLIEDERUNG (folge ihr EXAKT):
 
 REGELN:
 - Exakt {ziel_wortzahl} Wörter (±10%)
-- Folge den Szenen und Beats
+- Folge den Szenen und Beats GENAU
 - Single POV (Heldin)
 - Dialoge: schlagfertig, mit Subtext
 - Gedanken der Heldin: direkt, selbstironisch
 - Ende mit Hook oder emotionalem Beat
+- KEINE Meta-Kommentare, beginne DIREKT mit dem Text
 
-BEGINNE DIREKT mit dem Text. Keine Meta-Kommentare."""
+BEGINNE JETZT:"""
 
     text = call_claude(prompt)
     wortzahl = len(text.split())
-    print(f"      ✓ Geschrieben: {wortzahl} Wörter")
+    log(f"      ✓ Geschrieben: {wortzahl} Wörter")
+    save_versioned(output_dir, f"kapitel_{nr:02d}.md", text, iteration=1)
     
     # Zu kurz? Anreichern
     if wortzahl < ziel_wortzahl * 0.75:
-        print(f"      ⚠️ Zu kurz - reichere an...")
+        log(f"      ⚠️ Zu kurz ({wortzahl}/{ziel_wortzahl}) - reichere an...")
         
         anreicherung = f"""{STIL}
 
@@ -640,88 +817,195 @@ NICHT aufblähen! Stattdessen BEREICHERN durch:
 AKTUELLER TEXT:
 {text}
 
-Gib den VOLLSTÄNDIGEN angereicherten Text aus."""
+Gib den VOLLSTÄNDIGEN angereicherten Text aus:"""
 
         text = call_claude(anreicherung)
-        print(f"      ✓ Angereichert: {len(text.split())} Wörter")
+        wortzahl = len(text.split())
+        log(f"      ✓ Angereichert: {wortzahl} Wörter")
+        save_versioned(output_dir, f"kapitel_{nr:02d}.md", text, iteration=2)
     
     return text
 
 
 # ============================================================
-# PHASE 4: KONSISTENZ-CHECK (Gemini) + FIX (Claude)
+# PHASE 4: POLISH (Gemini Critique + Claude Fix)
 # ============================================================
 
-def phase4_konsistenz(kapitel_texte: list) -> list:
-    """Konsistenz-Check mit Gemini, Fixes mit Claude"""
+def phase4_polish(text: str, kapitel_nr: int, output_dir: Path) -> str:
+    """Kapitel polieren mit Gemini Critique"""
     
-    print(f"\n{'='*60}")
-    print("PHASE 4: KONSISTENZ-CHECK")
-    print(f"{'='*60}")
+    log(f"   [Kapitel {kapitel_nr}] Polish...")
     
-    # Alle Kapitel zusammenfügen für Gemini
-    full_text = "\n\n---\n\n".join([
-        f"KAPITEL {i+1}:\n{text}" 
-        for i, text in enumerate(kapitel_texte)
-    ])
+    # Gemini kritisiert (statt GPT)
+    kritik = call_gemini(f"""{SELF_CRITIQUE_PROMPT}
+
+Prüfe diesen Romantext auf:
+1. Wortwiederholungen
+2. Satzfragmente oder abgehackte Absätze
+3. Unnatürliche Dialoge
+4. Tempo-Probleme
+5. Fehlende Sinnesbeschreibungen
+6. Out-of-Character Momente
+
+TEXT:
+{text[:12000]}
+
+KONKRETE Verbesserungen (Liste):""", max_tokens=2000)
     
-    print(f"   Prüfe {len(kapitel_texte)} Kapitel ({len(full_text.split())} Wörter)...")
-    
-    # Gemini prüft (großer Kontext!)
-    check_prompt = f"""Prüfe diesen Roman auf KONSISTENZ-FEHLER:
+    # Claude überarbeitet
+    polished = call_claude(f"""Du erhältst einen Roman-Text und Feedback dazu.
 
-{full_text[:100000]}
+STIL-REGELN:
+{STIL}
 
-Finde:
-1. NAMEN-FEHLER (Name ändert sich, Schreibweise inkonsistent)
-2. FAKTEN-FEHLER (Augenfarbe, Beruf, Ort ändert sich)
-3. TIMELINE-FEHLER (Zeitsprünge die nicht passen)
-4. WISSENS-FEHLER (Figur weiß plötzlich etwas)
-5. CHARAKTER-FEHLER (Figur handelt out-of-character)
+FEEDBACK:
+{kritik}
 
-Für JEDEN Fehler:
-- Kapitel + ungefähre Position
-- Was ist falsch
-- Was wäre richtig
-
-Wenn KEINE Fehler: Schreib "KEINE FEHLER GEFUNDEN"
-"""
-
-    report = call_gemini(check_prompt, max_tokens=4000)
-    print(f"   ✓ Check abgeschlossen")
-    
-    # Wenn Fehler, mit Claude fixen
-    if "KEINE FEHLER" not in report.upper():
-        print(f"   ⚠️ Fehler gefunden - korrigiere...")
-        
-        korrigierte_kapitel = []
-        for i, text in enumerate(kapitel_texte):
-            # Prüfen ob dieses Kapitel im Report erwähnt wird
-            if f"Kapitel {i+1}" in report or f"KAPITEL {i+1}" in report:
-                print(f"      [Kapitel {i+1}] Korrigiere...")
-                
-                fix_prompt = f"""FEHLER-REPORT:
-{report}
-
-KAPITEL {i+1} TEXT:
+ORIGINALTEXT:
 {text}
 
-Korrigiere NUR die im Report genannten Fehler für dieses Kapitel.
-Behalte alles andere bei.
-
-Gib das VOLLSTÄNDIGE korrigierte Kapitel aus."""
-
-                fixed = call_claude(fix_prompt)
-                if len(fixed.split()) > len(text.split()) * 0.5:
-                    korrigierte_kapitel.append(fixed)
-                else:
-                    korrigierte_kapitel.append(text)
-            else:
-                korrigierte_kapitel.append(text)
-        
-        return korrigierte_kapitel
+AUFGABE: Setze das Feedback um. Gib den VOLLSTÄNDIGEN überarbeiteten Text aus.
+Beginne DIREKT mit dem ersten Satz des Kapitels:""")
     
-    return kapitel_texte
+    if len(polished.split()) > len(text.split()) * 0.5:
+        log(f"      ✓ Poliert ({len(polished.split())} Wörter)")
+        save_versioned(output_dir, f"kapitel_{kapitel_nr:02d}.md", polished, iteration=3)
+        return polished
+    else:
+        log(f"      ⚠️ Polish fehlgeschlagen, behalte Original")
+        return text
+
+
+# ============================================================
+# PHASE 5: FLOW-CHECK
+# ============================================================
+
+def phase5_flow_check(chapters: list, output_dir: Path) -> list:
+    """Prüft und korrigiert Übergänge zwischen Kapiteln"""
+    
+    log(f"\n{'='*60}")
+    log("PHASE 5: FLOW-CHECK (Kapitel-Übergänge)")
+    log(f"{'='*60}")
+    
+    telegram_send("🔄 *Phase 5 gestartet*: Flow-Check")
+    
+    corrected = [chapters[0]]
+    
+    for i in range(1, len(chapters)):
+        prev = corrected[i-1]
+        curr = chapters[i]
+        
+        log(f"\n   Prüfe Übergang {i} → {i+1}...")
+        
+        # Relevante Teile extrahieren
+        prev_words = prev.split()
+        curr_words = curr.split()
+        prev_end = ' '.join(prev_words[-(len(prev_words)//3):])
+        curr_start = ' '.join(curr_words[:len(curr_words)//3])
+        
+        check = call_gemini(f"""Prüfe den Übergang zwischen zwei Kapiteln:
+
+ENDE KAPITEL {i}:
+{prev_end}
+
+ANFANG KAPITEL {i+1}:
+{curr_start}
+
+Prüfe:
+1. Wissensstand-Konsistenz
+2. Emotionale Kontinuität
+3. Zeitliche Logik
+4. Fakten-Konsistenz (Namen, Orte)
+
+Antworte:
+- "OK" wenn alles passt
+- Oder liste die KONKRETEN Probleme""", max_tokens=1000)
+        
+        if "OK" in check.upper() and len(check) < 100:
+            log(f"      ✅ OK")
+            corrected.append(curr)
+        else:
+            log(f"      ⚠️ Probleme - korrigiere...")
+            
+            fixed = call_claude(f"""Der Übergang zwischen Kapiteln hat Probleme:
+
+PROBLEME:
+{check}
+
+ENDE KAPITEL {i}:
+{prev_end}
+
+KAPITEL {i+1} (vollständig):
+{curr}
+
+AUFGABE: Überarbeite Kapitel {i+1} so dass es nahtlos anschließt.
+Behebe die Probleme, behalte den Rest.
+
+{STIL}
+
+VOLLSTÄNDIG KORRIGIERTES KAPITEL:""")
+            
+            if len(fixed.split()) > len(curr.split()) * 0.5:
+                corrected.append(fixed)
+                save_versioned(output_dir, f"kapitel_{i+1:02d}.md", fixed, iteration=4)
+                log(f"      ✓ Korrigiert")
+            else:
+                corrected.append(curr)
+    
+    log(f"\n✓ Phase 5 abgeschlossen!")
+    return corrected
+
+
+# ============================================================
+# PHASE 6: GESAMT-CHECK
+# ============================================================
+
+def phase6_check(full_novel: str, output_dir: Path) -> str:
+    """Gesamt-Qualitätsprüfung"""
+    
+    log(f"\n{'='*60}")
+    log("PHASE 6: GESAMT-CHECK")
+    log(f"{'='*60}")
+    
+    telegram_send("🔍 *Phase 6 gestartet*: Qualitäts-Check")
+    
+    report = call_gemini(f"""Prüfe diesen Roman auf:
+
+1. CHARAKTERKONSISTENZ
+   - Namen korrekt?
+   - Eigenschaften konsistent?
+   - Wissen der Figuren logisch?
+
+2. PLOT-LÖCHER
+   - Unbeantwortete Fragen?
+   - Logikfehler?
+   - Vergessene Handlungsstränge?
+
+3. ROMANCE-ARC
+   - Enemies-to-Lovers glaubwürdig?
+   - Spannung aufgebaut?
+   - HEA earned?
+
+4. SUSPENSE-ARC
+   - Eskalation sichtbar (3 Stufen)?
+   - Antagonist präsent?
+   - Finale befriedigend?
+
+5. PACING
+   - Durchhänger?
+   - Zu schnelle Stellen?
+
+ROMAN (Auszug - ca. 50.000 Zeichen):
+{full_novel[:50000]}
+
+DETAILLIERTER BERICHT mit konkreten Fundstellen:""", max_tokens=4000)
+    
+    save_versioned(output_dir, "06_qualitaets_report.md", report)
+    
+    log(f"   ✓ Check abgeschlossen")
+    telegram_send(f"📊 *Qualitäts-Report erstellt*\n\n{report[:500]}...")
+    
+    return report
 
 
 # ============================================================
@@ -730,10 +1014,11 @@ Gib das VOLLSTÄNDIGE korrigierte Kapitel aus."""
 
 def run_pipeline(setting: str, output_dir: str = None):
     """Hauptfunktion"""
+    global LOG_FILE
     
     start = datetime.now()
     
-    # Output-Verzeichnis
+    # Output-Verzeichnis mit Timestamp
     if not output_dir:
         timestamp = start.strftime("%Y%m%d_%H%M%S")
         setting_clean = re.sub(r'[^a-zA-Z0-9äöüÄÖÜß]', '_', setting)[:30]
@@ -742,69 +1027,91 @@ def run_pipeline(setting: str, output_dir: str = None):
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
     
-    print(f"\n{'#'*60}")
-    print(f"# NOVEL PIPELINE V4")
-    print(f"# Setting: {setting}")
-    print(f"# Output: {output_dir}")
-    print(f"# Start: {start}")
-    print(f"{'#'*60}")
+    LOG_FILE = output_path / "pipeline.log"
     
-    telegram_send(f"🚀 *Pipeline gestartet*\n\nSetting: {setting}")
+    log(f"\n{'#'*60}")
+    log(f"# NOVEL PIPELINE V4")
+    log(f"# Setting: {setting}")
+    log(f"# Output: {output_dir}")
+    log(f"# Start: {start}")
+    log(f"{'#'*60}")
+    
+    # Qdrant initialisieren
+    qdrant_init_collection()
+    
+    telegram_send(f"🚀 *Pipeline V4 gestartet*\n\n📖 {setting}\n📁 {output_dir}")
     
     # Phase 1: Grob-Gliederung
-    gliederung = phase1_gliederung(setting)
-    (output_path / "01_gliederung.md").write_text(gliederung)
+    gliederung = phase1_gliederung(setting, output_path)
     
     # Phase 2: Akt-Gliederungen
-    akte = phase2_akte(gliederung)
-    for name, content in akte.items():
-        (output_path / f"02_{name}.md").write_text(content)
+    akte = phase2_akte(gliederung, output_path)
     
     # Phase 2.5: Kapitel-Gliederungen
-    kapitel_liste = phase2_5_kapitel(gliederung, akte)
-    for kap in kapitel_liste:
-        filename = f"02.5_kapitel_{kap['nummer']:02d}_gliederung.md"
-        (output_path / filename).write_text(kap["gliederung"])
+    kapitel_liste = phase2_5_kapitel(gliederung, akte, output_path)
     
-    # Phase 3: Schreiben
-    print(f"\n{'='*60}")
-    print("PHASE 3: SCHREIBEN")
-    print(f"{'='*60}")
+    # Phase 3 & 4: Schreiben + Polish
+    log(f"\n{'='*60}")
+    log("PHASE 3 & 4: SCHREIBEN + POLISH")
+    log(f"{'='*60}")
     
-    kapitel_texte = []
+    telegram_send(f"✍️ *Phase 3 & 4 gestartet*: Schreiben ({len(kapitel_liste)} Kapitel)")
+    
+    all_chapters = []
     vorheriges = None
     
     for kap in kapitel_liste:
-        text = phase3_schreiben(kap, vorheriges)
-        kapitel_texte.append(text)
-        vorheriges = text
+        text = phase3_schreiben(kap, vorheriges, output_path)
+        polished = phase4_polish(text, kap["nummer"], output_path)
         
-        # Zwischenspeichern
-        filename = f"kapitel_{kap['nummer']:02d}.md"
-        (output_path / filename).write_text(text)
+        all_chapters.append(polished)
+        vorheriges = polished
+        
+        save_versioned(output_path, f"kapitel_{kap['nummer']:02d}.md", polished)
+        
+        # In Qdrant speichern
+        qdrant_store(polished, {
+            "type": "kapitel_text",
+            "kapitel": kap["nummer"],
+            "wortzahl": len(polished.split())
+        })
+        
+        # Telegram Update alle 5 Kapitel
+        if kap["nummer"] % 5 == 0:
+            telegram_send(f"📝 Kapitel {kap['nummer']}/{len(kapitel_liste)} fertig")
     
-    # Phase 4: Konsistenz
-    kapitel_texte = phase4_konsistenz(kapitel_texte)
+    # Phase 5: Flow-Check
+    corrected = phase5_flow_check(all_chapters, output_path)
     
-    # Finale Kapitel speichern
-    for i, text in enumerate(kapitel_texte):
-        filename = f"kapitel_{i+1:02d}.md"
-        (output_path / filename).write_text(text)
+    # Korrigierte speichern
+    for i, chapter in enumerate(corrected):
+        save_versioned(output_path, f"kapitel_{i+1:02d}.md", chapter)
     
     # Roman zusammenfügen
-    full_novel = "\n\n---\n\n".join(kapitel_texte)
+    full_novel = "\n\n---\n\n".join(corrected)
     (output_path / "ROMAN_KOMPLETT.md").write_text(full_novel)
     
     wortzahl = len(full_novel.split())
+    log(f"\n   Gesamtwortzahl: {wortzahl:,} Wörter")
+    
+    # Phase 6: Gesamt-Check
+    report = phase6_check(full_novel, output_path)
+    
     duration = datetime.now() - start
     
-    print(f"\n{'#'*60}")
-    print(f"# FERTIG!")
-    print(f"# Wortzahl: {wortzahl}")
-    print(f"# Dauer: {duration}")
-    print(f"{'#'*60}")
+    log(f"\n{'#'*60}")
+    log(f"# FERTIG!")
+    log(f"# Wortzahl: {wortzahl:,}")
+    log(f"# Kapitel: {len(corrected)}")
+    log(f"# Dauer: {duration}")
+    log(f"{'#'*60}")
     
-    telegram_send(f"✅ *Pipeline fertig!*\n\n📊 {wortzahl} Wörter\n⏱ {duration}")
+    telegram_send(f"""✅ *PIPELINE FERTIG!*
+
+📊 {wortzahl:,} Wörter
+📚 {len(corrected)} Kapitel
+⏱ {duration}
+📁 {output_dir}""")
     
     return output_path
 
