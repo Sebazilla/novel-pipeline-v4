@@ -1,0 +1,21 @@
+# Secrets
+.env
+*.env
+
+# Output
+output/
+output_*/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# System
+.DS_Store
+*.log
+
+# Backups
+*.bak
+*.backup*
