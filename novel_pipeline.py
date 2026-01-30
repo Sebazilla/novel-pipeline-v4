@@ -173,6 +173,88 @@ def telegram_send(message: str) -> bool:
         return False
 
 
+def telegram_send_file(content: str, filename: str, caption: str = "") -> bool:
+    """Sendet eine Textdatei als Dokument via Telegram"""
+    import tempfile
+    
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendDocument"
+    
+    try:
+        # Temporäre Datei erstellen
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.md', delete=False) as f:
+            f.write(content)
+            temp_path = f.name
+        
+        # Datei senden
+        with open(temp_path, 'rb') as f:
+            r = requests.post(url, data={
+                "chat_id": TELEGRAM_CHAT_ID,
+                "caption": caption[:1024] if caption else ""  # Telegram caption limit
+            }, files={
+                "document": (filename, f, "text/markdown")
+            }, timeout=60)
+        
+        # Aufräumen
+        os.remove(temp_path)
+        
+        if r.status_code == 200:
+            return True
+        else:
+            log(f"    ⚠️ Telegram File Error: {r.text[:200]}")
+            return False
+            
+    except Exception as e:
+        log(f"    ⚠️ Telegram File Fehler: {e}")
+        return False
+
+
+def telegram_approval_file(filename: str, content: str, caption: str, timeout_minutes: int = 60) -> bool:
+    """Telegram Approval mit Datei-Anhang für lange Inhalte"""
+    # Datei senden
+    telegram_send_file(content, filename, caption)
+    # Dann Approval-Buttons als separate Nachricht
+    telegram_send("✅ JA = weiter\n❌ NEIN = neu generieren")
+    
+    log(f"      📱 Warte auf Approval (max {timeout_minutes} min)...")
+    
+    # Letzte Update-ID merken
+    try:
+        updates = requests.get(
+            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getUpdates",
+            timeout=10
+        ).json()
+        last_update_id = updates["result"][-1]["update_id"] if updates.get("result") else 0
+    except:
+        last_update_id = 0
+    
+    start_time = time.time()
+    while time.time() - start_time < timeout_minutes * 60:
+        time.sleep(3)
+        
+        try:
+            updates = requests.get(
+                f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getUpdates",
+                params={"offset": last_update_id + 1},
+                timeout=10
+            ).json()
+            
+            for update in updates.get("result", []):
+                last_update_id = update["update_id"]
+                text = update.get("message", {}).get("text", "").lower().strip()
+                
+                if text in ["ja", "yes", "j", "y", "ok", "👍"]:
+                    log(f"      ✅ Approved!")
+                    return True
+                elif text in ["nein", "no", "n", "👎"]:
+                    log(f"      ❌ Abgelehnt")
+                    return False
+        except:
+            continue
+    
+    log(f"      ⏰ Timeout - fahre fort")
+    return True
+
+
 def telegram_approval(message: str, timeout_minutes: int = 60) -> bool:
     """Telegram Approval mit JA/NEIN Antwort"""
     telegram_send(message + "\n\n✅ JA = weiter\n❌ NEIN = neu generieren")
@@ -682,8 +764,10 @@ Die überarbeitete Version muss KOMPLETT sein - nicht nur die Änderungen!
     while True:
         attempt += 1
         # Volle Gliederung senden (wird automatisch gesplittet)
-        approved = telegram_approval(
-            f"📋 *GLIEDERUNG* (Versuch {attempt})\n\n{gliederung}"
+        approved = telegram_approval_file(
+            f"gliederung_v{attempt}.md",
+            gliederung,
+            f"📋 *GLIEDERUNG* (Versuch {attempt})"
         )
         
         if approved:
@@ -767,9 +851,11 @@ KRITIK + VOLLSTÄNDIG ÜBERARBEITETE Akt-Gliederung:""", max_tokens=8000)
             log(f"      ✓ Überarbeitet")
             save_versioned(output_dir, f"02_akt_{akt_num}.md", akt, iteration=2)
         
-        # TELEGRAM APPROVAL für diesen Akt (voller Inhalt, wird auto-gesplittet)
-        approved = telegram_approval(
-            f"📋 *AKT {akt_num}*\n\n{beschreibung}\n\n{akt}"
+        # TELEGRAM APPROVAL für diesen Akt
+        approved = telegram_approval_file(
+            f"akt_{akt_num}.md",
+            akt,
+            f"📋 *AKT {akt_num}* - {beschreibung}"
         )
         
         if not approved:
@@ -926,12 +1012,19 @@ KRITIK + VOLLSTÄNDIG ÜBERARBEITETE Kapitel-Gliederung:""", max_tokens=4000)
     # TELEGRAM APPROVAL für Kapitel-Struktur
     log(f"\n   📱 Sende Kapitel-Übersicht zur Freigabe...")
     
-    uebersicht = "\n".join([
-        f"Kap {k['nummer']}: {k['titel'][:50]}" 
-        for k in kapitel_liste
-    ])
+    # Alle Kapitel-Gliederungen zusammenfassen
+    kapitel_inhalt = ""
+    for k in kapitel_liste:
+        kapitel_inhalt += f"\n\n{'='*60}\n"
+        kapitel_inhalt += f"KAPITEL {k['nummer']}: {k['titel']}\n"
+        kapitel_inhalt += f"{'='*60}\n\n"
+        kapitel_inhalt += k.get('gliederung', '[Keine Gliederung]')
     
-    telegram_approval(f"📚 *KAPITEL-STRUKTUR*\n\n{uebersicht[:1500]}\n\n*{len(kapitel_liste)} Kapitel total*")
+    telegram_approval_file(
+        "kapitel_struktur.md",
+        kapitel_inhalt,
+        f"📚 *KAPITEL-STRUKTUR* - {len(kapitel_liste)} Kapitel"
+    )
     
     log(f"\n✓ Phase 2.5 abgeschlossen! {len(kapitel_liste)} Kapitel")
     return kapitel_liste
