@@ -182,75 +182,96 @@ def telegram_approval(message: str, timeout_minutes: int = 60) -> bool:
 
 
 # ============================================================
-# QDRANT (Vektor-Speicher)
+# QDRANT + OPENAI EMBEDDINGS
 # ============================================================
 
-def qdrant_init_collection(collection_name: str = "novel"):
-    """Qdrant Collection erstellen falls nicht existiert"""
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
+QDRANT_COLLECTION = os.environ.get("QDRANT_COLLECTION", "memory_novelpipeline")
+
+
+def get_embedding(text: str) -> List[float]:
+    """OpenAI Embedding für Text generieren (1536 dims)"""
     try:
-        # Prüfen ob Collection existiert
+        url = "https://api.openai.com/v1/embeddings"
+        headers = {
+            "Authorization": f"Bearer {OPENAI_API_KEY}",
+            "Content-Type": "application/json"
+        }
+        payload = {
+            "model": "text-embedding-3-small",
+            "input": text[:8000]  # Token limit
+        }
+        r = requests.post(url, headers=headers, json=payload, timeout=30)
+        r.raise_for_status()
+        return r.json()["data"][0]["embedding"]
+    except Exception as e:
+        log(f"   ⚠️ OpenAI Embedding Fehler: {e}")
+        return []
+
+
+def qdrant_init_collection(collection_name: str = None):
+    """Prüft ob Qdrant Collection erreichbar ist"""
+    collection_name = collection_name or QDRANT_COLLECTION
+    try:
         r = requests.get(f"{QDRANT_URL}/collections/{collection_name}", timeout=5)
         if r.status_code == 200:
+            log(f"   ✓ Qdrant Collection '{collection_name}' verbunden")
             return True
-        
-        # Erstellen
-        requests.put(f"{QDRANT_URL}/collections/{collection_name}", json={
-            "vectors": {
-                "size": 384,  # Für all-MiniLM-L6-v2
-                "distance": "Cosine"
-            }
-        }, timeout=10)
-        log(f"   ✓ Qdrant Collection '{collection_name}' erstellt")
-        return True
+        log(f"   ⚠️ Qdrant Collection '{collection_name}' nicht gefunden")
+        return False
     except Exception as e:
         log(f"   ⚠️ Qdrant nicht erreichbar: {e}")
         return False
 
 
-def qdrant_store(content: str, metadata: dict, collection: str = "novel"):
-    """Text in Qdrant speichern (mit einfachem Hash als "Embedding")"""
+def qdrant_store(content: str, metadata: dict, collection: str = None):
+    """Text mit OpenAI Embedding in Qdrant speichern"""
+    collection = collection or QDRANT_COLLECTION
     try:
-        # Einfaches "Embedding" via Hash (für Demo - später echte Embeddings)
-        content_hash = hashlib.md5(content.encode()).hexdigest()
-        vector = [float(int(content_hash[i:i+2], 16)) / 255.0 for i in range(0, 32, 2)] * 24
-        vector = vector[:384]
+        # OpenAI Embedding
+        embedding = get_embedding(content[:4000])
+        if not embedding:
+            return False
         
+        # Unique ID aus Metadata
         point_id = int(hashlib.md5(json.dumps(metadata, sort_keys=True).encode()).hexdigest()[:8], 16)
         
         requests.put(f"{QDRANT_URL}/collections/{collection}/points", json={
             "points": [{
                 "id": point_id,
-                "vector": vector,
+                "vector": embedding,
                 "payload": {
-                    "content": content[:10000],  # Limit
+                    "content": content[:15000],
+                    "timestamp": datetime.now().isoformat(),
                     **metadata
                 }
             }]
-        }, timeout=10)
+        }, timeout=15)
         return True
     except Exception as e:
         log(f"   ⚠️ Qdrant Store Fehler: {e}")
         return False
 
 
-def qdrant_search(query: str, collection: str = "novel", limit: int = 5) -> List[dict]:
-    """In Qdrant suchen"""
+def qdrant_search(query: str, collection: str = None, limit: int = 5) -> List[dict]:
+    """Semantische Suche in Qdrant mit OpenAI Embedding"""
+    collection = collection or QDRANT_COLLECTION
     try:
-        # Einfaches "Embedding" via Hash
-        query_hash = hashlib.md5(query.encode()).hexdigest()
-        vector = [float(int(query_hash[i:i+2], 16)) / 255.0 for i in range(0, 32, 2)] * 24
-        vector = vector[:384]
+        embedding = get_embedding(query)
+        if not embedding:
+            return []
         
         r = requests.post(f"{QDRANT_URL}/collections/{collection}/points/search", json={
-            "vector": vector,
+            "vector": embedding,
             "limit": limit,
             "with_payload": True
-        }, timeout=10)
+        }, timeout=15)
         
         if r.status_code == 200:
             return [hit["payload"] for hit in r.json().get("result", [])]
         return []
-    except:
+    except Exception as e:
+        log(f"   ⚠️ Qdrant Search Fehler: {e}")
         return []
 
 
