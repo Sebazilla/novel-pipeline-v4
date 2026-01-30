@@ -121,16 +121,52 @@ def call_claude(prompt: str, timeout: int = 600) -> str:
 # ============================================================
 
 def telegram_send(message: str) -> bool:
-    """Nachricht an Telegram senden"""
+    """Nachricht an Telegram senden - splittet automatisch bei langen Nachrichten"""
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    
+    # Telegram Limit ist 4096, wir nehmen 3800 für Sicherheit
+    MAX_LEN = 3800
+    
     try:
-        # Markdown escapen für Telegram
-        text = message[:4000]  # Telegram Limit
-        requests.post(url, json={
-            "chat_id": TELEGRAM_CHAT_ID,
-            "text": text,
-            "parse_mode": "Markdown"
-        }, timeout=30)
+        if len(message) <= MAX_LEN:
+            # Kurze Nachricht - direkt senden
+            requests.post(url, json={
+                "chat_id": TELEGRAM_CHAT_ID,
+                "text": message,
+                "parse_mode": "Markdown"
+            }, timeout=30)
+        else:
+            # Lange Nachricht - in Teile splitten
+            parts = []
+            remaining = message
+            part_num = 1
+            
+            while remaining:
+                if len(remaining) <= MAX_LEN:
+                    parts.append(remaining)
+                    break
+                
+                # Finde guten Trennpunkt (Zeilenumbruch)
+                split_at = remaining[:MAX_LEN].rfind('\n\n')
+                if split_at < MAX_LEN // 2:
+                    split_at = remaining[:MAX_LEN].rfind('\n')
+                if split_at < MAX_LEN // 2:
+                    split_at = MAX_LEN
+                
+                parts.append(remaining[:split_at])
+                remaining = remaining[split_at:].lstrip()
+            
+            # Teile senden
+            total = len(parts)
+            for i, part in enumerate(parts):
+                header = f"_Teil {i+1}/{total}_\n\n" if total > 1 else ""
+                requests.post(url, json={
+                    "chat_id": TELEGRAM_CHAT_ID,
+                    "text": header + part,
+                    "parse_mode": "Markdown"
+                }, timeout=30)
+                time.sleep(0.5)  # Rate limit vermeiden
+        
         return True
     except Exception as e:
         log(f"    ⚠️ Telegram Fehler: {e}")
@@ -503,6 +539,12 @@ TON:
 - Hoffnung scheint durch auch in dunklen Momenten
 - Der Leser soll lachen UND mitfiebern
 - Moderne Sprache, keine altmodischen Floskeln
+
+SPRACHE:
+- Deutsch (Deutschland)
+- Deutsche Anführungszeichen: „..." und ‚...'
+- Keine unnötigen Anglizismen
+- Natürlicher, flüssiger Sprachstil
 """
 
 SELF_CRITIQUE_PROMPT = """
@@ -636,44 +678,12 @@ Die überarbeitete Version muss KOMPLETT sein - nicht nur die Änderungen!
     # TELEGRAM APPROVAL - Gliederung direkt
     log(f"\n   📱 Sende Gliederung zur Freigabe...")
     
-    # Kurze Übersicht für Telegram erstellen
-    def extract_summary(text):
-        """Extrahiert Titel, Charaktere und Phasen-Übersicht"""
-        lines = []
-        
-        # Titel
-        match = re.search(r'Titel[:\s]*(.+)', text, re.IGNORECASE)
-        if match:
-            lines.append(f"📖 *{match.group(1).strip()}*")
-        
-        # Heldin
-        match = re.search(r'HELDIN.*?Name[,:\s]*([^\n,]+)', text, re.IGNORECASE | re.DOTALL)
-        if match:
-            lines.append(f"👩 Heldin: {match.group(1).strip()}")
-        
-        # Hero
-        match = re.search(r'HERO.*?Name[,:\s]*([^\n,]+)', text, re.IGNORECASE | re.DOTALL)
-        if match:
-            lines.append(f"👨 Hero: {match.group(1).strip()}")
-        
-        # Antagonist
-        match = re.search(r'ANTAGONIST.*?Name[,:\s]*([^\n,]+)', text, re.IGNORECASE | re.DOTALL)
-        if match:
-            lines.append(f"😈 Antagonist: {match.group(1).strip()}")
-        
-        # Nebencharaktere zählen
-        neben_count = len(re.findall(r'Name[,:\s]+[A-Z][a-zäöü]+', text[text.find('NEBENCHARAKTER'):] if 'NEBENCHARAKTER' in text else ''))
-        if neben_count:
-            lines.append(f"👥 {neben_count} Nebencharaktere")
-        
-        return "\n".join(lines) if lines else text[:1000]
-    
-    max_attempts = 5
-    for attempt in range(max_attempts):
-        summary = extract_summary(gliederung)
-        
+    attempt = 0
+    while True:
+        attempt += 1
+        # Volle Gliederung senden (wird automatisch gesplittet)
         approved = telegram_approval(
-            f"📋 *GLIEDERUNG* (Versuch {attempt+1}/{max_attempts})\n\n{summary}\n\n_Vollständige Gliederung: {len(gliederung)} Zeichen_"
+            f"📋 *GLIEDERUNG* (Versuch {attempt})\n\n{gliederung}"
         )
         
         if approved:
@@ -691,7 +701,7 @@ Die überarbeitete Version muss KOMPLETT sein - nicht nur die Änderungen!
             for j in range(iterations):
                 critique_prompt = f"""{SELF_CRITIQUE_PROMPT}\n\n{gliederung}\n\nVOLLSTÄNDIG ÜBERARBEITETE Gliederung:"""
                 gliederung = call_gemini(critique_prompt, max_tokens=12000)
-            save_versioned(output_dir, "01_gliederung.md", gliederung, iteration=attempt+iterations+2)
+            save_versioned(output_dir, "01_gliederung.md", gliederung, iteration=attempt+iterations+1)
     
     # Finale Version speichern
     save_versioned(output_dir, "01_gliederung.md", gliederung)
