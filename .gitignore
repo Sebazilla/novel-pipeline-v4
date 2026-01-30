@@ -1,21 +1,19 @@
 # Secrets
 .env
-*.env
-
-# Output
-output/
-output_*/
 
 # Python
 __pycache__/
 *.pyc
-.venv/
-venv/
 
-# System
-.DS_Store
+# Output
+output_*/
+*.pdf
+*.epub
+*.tar.gz
+
+# Logs
 *.log
 
-# Backups
-*.bak
-*.backup*
+# OS
+.DS_Store
+

@@ -23,7 +23,7 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-GEMINI_MODEL = "gemini-2.5-pro-preview-05-06"  # Aktuellstes Modell
+GEMINI_MODEL = "gemini-2.5-pro"  # Aktuellstes Modell
 
 # ============================================================
 # API CALLS
