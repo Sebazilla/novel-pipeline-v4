@@ -767,12 +767,9 @@ KRITIK + VOLLSTÄNDIG ÜBERARBEITETE Akt-Gliederung:""", max_tokens=8000)
             log(f"      ✓ Überarbeitet")
             save_versioned(output_dir, f"02_akt_{akt_num}.md", akt, iteration=2)
         
-        # TELEGRAM APPROVAL für diesen Akt
-        kapitel_match = re.findall(r'Kapitel\s*(\d+)[:\s]*([^\n]+)', akt, re.IGNORECASE)
-        kapitel_list = "\n".join([f"  {num}: {titel[:40]}" for num, titel in kapitel_match[:10]])
-        
+        # TELEGRAM APPROVAL für diesen Akt (voller Inhalt, wird auto-gesplittet)
         approved = telegram_approval(
-            f"📋 *AKT {akt_num}*\n\n{beschreibung}\n\n*Kapitel:*\n{kapitel_list}\n\n_({len(akt)} Zeichen)_"
+            f"📋 *AKT {akt_num}*\n\n{beschreibung}\n\n{akt}"
         )
         
         if not approved:
