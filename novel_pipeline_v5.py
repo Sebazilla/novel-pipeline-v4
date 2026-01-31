@@ -260,7 +260,9 @@ def telegram_approval(prompt: str, filepath: Path = None, content_for_file: str 
     elif content_for_file:
         # Save content as temp file and send
         import tempfile
-        temp_path = Path(tempfile.gettempdir()) / f"approval_{int(time.time())}.md"
+        import random
+        unique_id = f"{int(time.time())}_{random.randint(1000,9999)}"
+        temp_path = Path(tempfile.gettempdir()) / f"approval_{unique_id}.md"
         with open(temp_path, 'w', encoding='utf-8') as f:
             f.write(content_for_file)
         telegram_send_file(temp_path, prompt)
