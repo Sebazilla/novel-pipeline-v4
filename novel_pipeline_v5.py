@@ -1085,9 +1085,7 @@ Gib JEDES Kapitel aus (1 bis {num_chapters}). Überarbeite nur die vom Feedback 
             save_md(combined_path, updated)
             
             # Re-parse kapitel_gliederungen from updated content
-            new_chapters = re.split(r'
----
-', updated)
+            new_chapters = re.split(r'\n---\n', updated)
             for i, chapter_content in enumerate(new_chapters):
                 if i < len(kapitel_gliederungen):
                     kapitel_gliederungen[i]["gliederung"] = chapter_content
