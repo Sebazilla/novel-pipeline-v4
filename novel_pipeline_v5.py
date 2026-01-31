@@ -243,10 +243,12 @@ def telegram_wait_for_start() -> str:
             time.sleep(5)
 
 
-def telegram_approval(prompt: str, filepath: Path = None, timeout_minutes: int = 60) -> tuple[bool, str]:
+def telegram_approval(prompt: str, filepath: Path = None, content_for_file: str = None, timeout_minutes: int = 60) -> tuple[bool, str]:
     """
     Wait for user approval via Telegram.
     Returns (approved: bool, feedback: str)
+    
+    If content_for_file is provided, it will be saved as temp MD file and sent.
     """
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         response = input(f"{prompt} (JA/NEIN + Feedback): ")
@@ -255,6 +257,13 @@ def telegram_approval(prompt: str, filepath: Path = None, timeout_minutes: int =
     # Send file if provided
     if filepath and filepath.exists():
         telegram_send_file(filepath, prompt)
+    elif content_for_file:
+        # Save content as temp file and send
+        import tempfile
+        temp_path = Path(tempfile.gettempdir()) / f"approval_{int(time.time())}.md"
+        with open(temp_path, 'w', encoding='utf-8') as f:
+            f.write(content_for_file)
+        telegram_send_file(temp_path, prompt)
     else:
         telegram_send(prompt)
     
@@ -462,9 +471,10 @@ def step2_approval_and_setup(synopsis: str, output_dir: Path) -> tuple[Path, str
     log("="*60)
     
     while True:
-        # Send for approval
+        # Send for approval - Synopsis als File
         approved, feedback = telegram_approval(
-            f"📖 *SYNOPSIS VORSCHLAG*\n\n{synopsis}\n\n*Passt das?*",
+            "📖 *SYNOPSIS VORSCHLAG*\n\nBitte prüfe die Datei.",
+            content_for_file=synopsis,
             timeout_minutes=120
         )
         
