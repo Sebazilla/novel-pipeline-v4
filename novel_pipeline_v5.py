@@ -1034,14 +1034,17 @@ def step8_kapitel_approval(project_dir: Path, kapitel_gliederungen: list) -> lis
             gliederung = (project_dir / "04_gliederung.md").read_text()
             current = combined_path.read_text()
             
+            # Zähle Kapitel
+            num_chapters = len(kapitel_gliederungen)
+            
             prompt = f"""
 Die Kapitel-Gliederungen wurden abgelehnt.
 
-FEEDBACK:
+FEEDBACK VOM USER:
 {feedback}
 
-AKTUELLE GLIEDERUNGEN:
-{current[:30000]}
+AKTUELLE GLIEDERUNGEN (ALLE {num_chapters} KAPITEL):
+{current}
 
 SYNOPSIS:
 {synopsis}
@@ -1049,15 +1052,45 @@ SYNOPSIS:
 GESAMT-GLIEDERUNG:
 {gliederung[:5000]}
 
-Überarbeite die Kapitel-Gliederungen entsprechend dem Feedback.
-Achte besonders auf die genannten Punkte.
-Behalte das Fakten-Logbuch Format bei.
+WICHTIG - KRITISCHE ANWEISUNG:
+Du MUSST ALLE {num_chapters} KAPITEL in deiner Antwort ausgeben!
+Überarbeite die Kapitel entsprechend dem Feedback, aber stelle sicher dass JEDES Kapitel (1-{num_chapters}) in der Ausgabe enthalten ist.
+Wenn das Feedback nur bestimmte Kapitel betrifft, übernimm die anderen Kapitel UNVERÄNDERT.
+Behalte das Fakten-Logbuch Format bei jedem Kapitel.
+
+Gib ALLE {num_chapters} Kapitel-Gliederungen aus, getrennt durch ---
 """
-            updated = call_gemini(prompt, max_tokens=16000)
+            updated = call_gemini(prompt, max_tokens=65000)
+            
+            # Prüfe ob alle Kapitel enthalten sind
+            chapter_count = len(re.findall(r'##\s*KAPITEL\s*\d+', updated, re.IGNORECASE))
+            if chapter_count < num_chapters:
+                log(f"      ⚠️ Nur {chapter_count}/{num_chapters} Kapitel erhalten - erneuter Versuch...")
+                # Zweiter Versuch mit noch expliziterem Prompt
+                prompt2 = f"""
+FEHLER: Deine letzte Antwort enthielt nur {chapter_count} von {num_chapters} Kapiteln!
+
+Du MUSST jetzt ALLE {num_chapters} Kapitel ausgeben.
+
+FEEDBACK VOM USER:
+{feedback}
+
+ALLE KAPITEL DIE DU AUSGEBEN MUSST:
+{current}
+
+Gib JEDES Kapitel aus (1 bis {num_chapters}). Überarbeite nur die vom Feedback betroffenen, kopiere den Rest 1:1.
+"""
+                updated = call_gemini(prompt2, max_tokens=65000)
+            
             save_md(combined_path, updated)
             
-            # Re-parse
-            # (simplified - in production would re-parse properly)
+            # Re-parse kapitel_gliederungen from updated content
+            new_chapters = re.split(r'
+---
+', updated)
+            for i, chapter_content in enumerate(new_chapters):
+                if i < len(kapitel_gliederungen):
+                    kapitel_gliederungen[i]["gliederung"] = chapter_content
     
     log(f"   ✓ Kapitel-Gliederungen bestätigt")
     return kapitel_gliederungen
