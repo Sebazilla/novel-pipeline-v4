@@ -39,7 +39,8 @@ TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 QDRANT_URL = os.environ.get("QDRANT_URL", "http://localhost:6333")
 
-GEMINI_MODEL = "gemini-3-pro-preview"
+GEMINI_MODEL_PRO = "gemini-3-pro-preview"
+GEMINI_MODEL_FLASH = "gemini-2.0-flash"  # Für Self-Critique, Polish, Flow-Check
 
 # ============================================================
 # LOGGING
@@ -748,7 +749,7 @@ AUFGABE:
 Die überarbeitete Version muss KOMPLETT sein - nicht nur die Änderungen!
 """
         
-        verbessert = call_gemini(critique_prompt, max_tokens=16000)
+        verbessert = call_gemini(critique_prompt, max_tokens=16000, use_flash=True)
         
         if len(verbessert) > len(gliederung) * 0.5:
             gliederung = verbessert
@@ -784,7 +785,7 @@ Die überarbeitete Version muss KOMPLETT sein - nicht nur die Änderungen!
             gliederung = call_gemini(prompt, max_tokens=16000)
             for j in range(iterations):
                 critique_prompt = f"""{SELF_CRITIQUE_PROMPT}\n\n{gliederung}\n\nVOLLSTÄNDIG ÜBERARBEITETE Gliederung:"""
-                gliederung = call_gemini(critique_prompt, max_tokens=16000)
+                gliederung = call_gemini(critique_prompt, max_tokens=16000, use_flash=True)
             save_versioned(output_dir, "01_gliederung.md", gliederung, iteration=attempt+iterations+1)
     
     # Finale Version speichern
@@ -844,7 +845,7 @@ Für JEDES Kapitel in diesem Akt:
 Akt {akt_num} Gliederung:
 {akt}
 
-KRITIK + VOLLSTÄNDIG ÜBERARBEITETE Akt-Gliederung:""", max_tokens=12000)
+KRITIK + VOLLSTÄNDIG ÜBERARBEITETE Akt-Gliederung:""", max_tokens=12000, use_flash=True)
         
         if len(critique) > len(akt) * 0.5:
             akt = critique
@@ -861,7 +862,7 @@ KRITIK + VOLLSTÄNDIG ÜBERARBEITETE Akt-Gliederung:""", max_tokens=12000)
         if not approved:
             log(f"   🔄 Akt {akt_num} abgelehnt - generiere neu...")
             akt = call_gemini(prompt, max_tokens=12000)
-            critique = call_gemini(f"""{SELF_CRITIQUE_PROMPT}\n\nAkt {akt_num}:\n{akt}\n\nÜBERARBEITET:""", max_tokens=12000)
+            critique = call_gemini(f"""{SELF_CRITIQUE_PROMPT}\n\nAkt {akt_num}:\n{akt}\n\nÜBERARBEITET:""", max_tokens=12000, use_flash=True)
             if len(critique) > len(akt) * 0.5:
                 akt = critique
             save_versioned(output_dir, f"02_akt_{akt_num}.md", akt, iteration=3)
@@ -984,7 +985,7 @@ Liste ALLE Figuren die vorkommen mit:
 Kapitel-Gliederung:
 {kap_gliederung}
 
-KRITIK + VOLLSTÄNDIG ÜBERARBEITETE Kapitel-Gliederung:""", max_tokens=8000)
+KRITIK + VOLLSTÄNDIG ÜBERARBEITETE Kapitel-Gliederung:""", max_tokens=8000, use_flash=True)
             
             if len(improved) > len(kap_gliederung) * 0.5:
                 kap_gliederung = improved
@@ -1179,7 +1180,7 @@ Prüfe diesen Romantext auf:
 TEXT:
 {text[:12000]}
 
-KONKRETE Verbesserungen (Liste):""", max_tokens=2000)
+KONKRETE Verbesserungen (Liste):""", max_tokens=4000, use_flash=True)
     
     # Claude überarbeitet
     polished = call_claude(f"""Du erhältst einen Roman-Text und Feedback dazu.
@@ -1265,7 +1266,7 @@ Prüfe:
 
 Antworte:
 - "OK" wenn alles passt
-- Oder liste die KONKRETEN Probleme""", max_tokens=1000)
+- Oder liste die KONKRETEN Probleme""", max_tokens=4000, use_flash=True)
         
         if "OK" in check.upper() and len(check) < 100:
             log(f"      ✅ OK")
@@ -1344,7 +1345,7 @@ def phase6_check(full_novel: str, output_dir: Path) -> str:
 ROMAN (Auszug - ca. 50.000 Zeichen):
 {full_novel[:50000]}
 
-DETAILLIERTER BERICHT mit konkreten Fundstellen:""", max_tokens=8000)
+DETAILLIERTER BERICHT mit konkreten Fundstellen:""", max_tokens=8000, use_flash=True)
     
     save_versioned(output_dir, "06_qualitaets_report.md", report)
     
