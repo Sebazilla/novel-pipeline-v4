@@ -401,14 +401,20 @@ def save_pdf(path: Path, content: str):
 # PIPELINE STEPS
 # ============================================================
 
-def step1_synopsis(output_dir: Path) -> str:
+def step1_synopsis(output_dir: Path, theme: str = None) -> str:
     """Step 1: Gemini generates Synopsis + Arbeitstitel"""
     log("\n" + "="*60)
     log("SCHRITT 1: SYNOPSIS GENERIEREN")
     log("="*60)
     
+    if theme:
+        log(f"   Thema vorgegeben: {theme}")
+        theme_instruction = f"\n\nTHEMA/SETTING (vom User vorgegeben):\n{theme}\n\nEntwickle die Synopsis basierend auf diesem Thema."
+    else:
+        theme_instruction = ""
+    
     prompt = f"""
-{MASTER_STRUKTUR}
+{MASTER_STRUKTUR}{theme_instruction}
 
 AUFGABE: Entwickle eine originelle Buchidee für einen Contemporary Romance / Enemies-to-Lovers Roman.
 
@@ -1470,7 +1476,7 @@ Gib das VOLLSTÄNDIGE korrigierte Kapitel aus.
 # MAIN PIPELINE
 # ============================================================
 
-def run_pipeline():
+def run_pipeline(theme: str = None, wait_for_start: bool = True):
     """Run the complete 13-step pipeline"""
     global LOG_FILE
     
@@ -1490,12 +1496,13 @@ def run_pipeline():
     log(f"# Output: {output_dir}")
     log(f"{'#'*60}")
     
-    # Wait for start
-    telegram_wait_for_start()
+    # Wait for start if needed
+    if wait_for_start:
+        telegram_wait_for_start()
     
     try:
         # Step 1: Synopsis
-        synopsis = step1_synopsis(output_dir)
+        synopsis = step1_synopsis(output_dir, theme=theme)
         if not synopsis:
             raise Exception("Synopsis-Generierung fehlgeschlagen")
         
@@ -1568,24 +1575,31 @@ if __name__ == "__main__":
     
     print("=== Novel Pipeline V5 ===")
     print("")
-    print("13-Schritt-Prozess:")
-    print("  1. Synopsis generieren")
-    print("  2. Synopsis bestätigen")
-    print("  3. Master-Struktur ablegen")
-    print("  4. Charaktersheets erstellen")
-    print("  5. Gliederung erstellen")
-    print("  6. Gliederung bestätigen")
-    print("  7. Kapitel-Gliederungen + Fakten-Logbuch")
-    print("  8. Kapitel-Gliederungen bestätigen")
-    print("  9. Logik-Check → Mängelliste")
-    print(" 10. Korrekturen (Claude)")
-    print(" 11. Kapitel schreiben (Claude)")
-    print(" 12. Final-Check (Gemini)")
-    print(" 13. Finalisierung + Ausgabe")
+    print("Verwendung:")
+    print("  python novel_pipeline_v5.py --telegram              # Warte auf /start, Gemini generiert Thema")
+    print("  python novel_pipeline_v5.py --telegram 'Thema'      # Warte auf /start, nutze vorgegebenes Thema")
+    print("  python novel_pipeline_v5.py 'Thema'                 # Direkt starten mit Thema")
+    print("")
+    print("Beispiel:")
+    print("  python novel_pipeline_v5.py 'Winzerin im Rheingau trifft Weinkritiker'")
     print("")
     
-    if "--run" in sys.argv:
-        run_pipeline()
+    if len(sys.argv) < 2:
+        print("Bitte Modus angeben (--telegram oder Thema)")
+        sys.exit(1)
+    
+    theme = None
+    wait_telegram = False
+    
+    for arg in sys.argv[1:]:
+        if arg == "--telegram":
+            wait_telegram = True
+        elif not arg.startswith("-"):
+            theme = arg
+    
+    if wait_telegram:
+        run_pipeline(theme=theme, wait_for_start=True)
+    elif theme:
+        run_pipeline(theme=theme, wait_for_start=False)
     else:
-        print("Starte mit: python novel_pipeline_v5.py --run")
-        print("Oder warte auf /start in Telegram")
+        print("Bitte Thema angeben oder --telegram nutzen")
