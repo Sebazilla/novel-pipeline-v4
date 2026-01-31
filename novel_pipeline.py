@@ -726,7 +726,7 @@ PRÜFE VOR DER AUSGABE:
 - Hat jede Phase einen KLAREN Höhepunkt?
 """
 
-    gliederung = call_gemini(prompt, max_tokens=12000)
+    gliederung = call_gemini(prompt, max_tokens=16000)
     log(f"   ✓ Erste Version ({len(gliederung)} Zeichen)")
     save_versioned(output_dir, "01_gliederung.md", gliederung, iteration=1)
     
@@ -748,7 +748,7 @@ AUFGABE:
 Die überarbeitete Version muss KOMPLETT sein - nicht nur die Änderungen!
 """
         
-        verbessert = call_gemini(critique_prompt, max_tokens=12000)
+        verbessert = call_gemini(critique_prompt, max_tokens=16000)
         
         if len(verbessert) > len(gliederung) * 0.5:
             gliederung = verbessert
@@ -781,10 +781,10 @@ Die überarbeitete Version muss KOMPLETT sein - nicht nur die Änderungen!
             break
         else:
             log(f"   🔄 Generiere neue Version...")
-            gliederung = call_gemini(prompt, max_tokens=12000)
+            gliederung = call_gemini(prompt, max_tokens=16000)
             for j in range(iterations):
                 critique_prompt = f"""{SELF_CRITIQUE_PROMPT}\n\n{gliederung}\n\nVOLLSTÄNDIG ÜBERARBEITETE Gliederung:"""
-                gliederung = call_gemini(critique_prompt, max_tokens=12000)
+                gliederung = call_gemini(critique_prompt, max_tokens=16000)
             save_versioned(output_dir, "01_gliederung.md", gliederung, iteration=attempt+iterations+1)
     
     # Finale Version speichern
@@ -834,7 +834,7 @@ Für JEDES Kapitel in diesem Akt:
 6. Wortzahl-Ziel (Gesamt ~80.000 Wörter, 18-22 Kapitel)
 """
         
-        akt = call_gemini(prompt, max_tokens=8000)
+        akt = call_gemini(prompt, max_tokens=12000)
         log(f"      ✓ Erstellt ({len(akt)} Zeichen)")
         save_versioned(output_dir, f"02_akt_{akt_num}.md", akt, iteration=1)
         
@@ -844,7 +844,7 @@ Für JEDES Kapitel in diesem Akt:
 Akt {akt_num} Gliederung:
 {akt}
 
-KRITIK + VOLLSTÄNDIG ÜBERARBEITETE Akt-Gliederung:""", max_tokens=8000)
+KRITIK + VOLLSTÄNDIG ÜBERARBEITETE Akt-Gliederung:""", max_tokens=12000)
         
         if len(critique) > len(akt) * 0.5:
             akt = critique
@@ -860,8 +860,8 @@ KRITIK + VOLLSTÄNDIG ÜBERARBEITETE Akt-Gliederung:""", max_tokens=8000)
         
         if not approved:
             log(f"   🔄 Akt {akt_num} abgelehnt - generiere neu...")
-            akt = call_gemini(prompt, max_tokens=8000)
-            critique = call_gemini(f"""{SELF_CRITIQUE_PROMPT}\n\nAkt {akt_num}:\n{akt}\n\nÜBERARBEITET:""", max_tokens=8000)
+            akt = call_gemini(prompt, max_tokens=12000)
+            critique = call_gemini(f"""{SELF_CRITIQUE_PROMPT}\n\nAkt {akt_num}:\n{akt}\n\nÜBERARBEITET:""", max_tokens=12000)
             if len(critique) > len(akt) * 0.5:
                 akt = critique
             save_versioned(output_dir, f"02_akt_{akt_num}.md", akt, iteration=3)
@@ -975,7 +975,7 @@ Liste ALLE Figuren die vorkommen mit:
 - Welches Charakter-Verhalten wäre OOC (out of character)?
 """
             
-            kap_gliederung = call_gemini(prompt, max_tokens=4000)
+            kap_gliederung = call_gemini(prompt, max_tokens=8000)
             save_versioned(output_dir, f"02.5_kapitel_{kapitel_nr:02d}_gliederung.md", kap_gliederung, iteration=1)
             
             # Self-Critique
@@ -984,7 +984,7 @@ Liste ALLE Figuren die vorkommen mit:
 Kapitel-Gliederung:
 {kap_gliederung}
 
-KRITIK + VOLLSTÄNDIG ÜBERARBEITETE Kapitel-Gliederung:""", max_tokens=4000)
+KRITIK + VOLLSTÄNDIG ÜBERARBEITETE Kapitel-Gliederung:""", max_tokens=8000)
             
             if len(improved) > len(kap_gliederung) * 0.5:
                 kap_gliederung = improved
@@ -1344,7 +1344,7 @@ def phase6_check(full_novel: str, output_dir: Path) -> str:
 ROMAN (Auszug - ca. 50.000 Zeichen):
 {full_novel[:50000]}
 
-DETAILLIERTER BERICHT mit konkreten Fundstellen:""", max_tokens=4000)
+DETAILLIERTER BERICHT mit konkreten Fundstellen:""", max_tokens=8000)
     
     save_versioned(output_dir, "06_qualitaets_report.md", report)
     
