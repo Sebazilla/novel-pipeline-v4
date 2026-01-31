@@ -1462,12 +1462,40 @@ def run_pipeline(setting: str, output_dir: str = None):
     log(f"# Dauer: {duration}")
     log(f"{'#'*60}")
     
+    # Roman zusammenfügen
+    log(f"\n   📚 Erstelle Gesamtdatei...")
+    
+    # Titel aus Gliederung extrahieren
+    titel_match = re.search(r'Titel[:\s]*([^\n]+)', gliederung, re.IGNORECASE)
+    titel = titel_match.group(1).strip() if titel_match else "Roman"
+    titel_clean = re.sub(r'[^a-zA-ZäöüÄÖÜß0-9_\- ]', '', titel)[:50]
+    
+    roman_path = output_path / f"{titel_clean}.md"
+    
+    with open(roman_path, 'w') as f:
+        f.write(f"# {titel}\n\n")
+        f.write(f"_Ein Roman_\n\n")
+        f.write(f"---\n\n")
+        
+        for i, chapter in enumerate(corrected, 1):
+            f.write(chapter)
+            f.write(f"\n\n---\n\n")
+    
+    log(f"   ✓ {roman_path.name} erstellt")
+    
+    # Per Telegram senden
     telegram_send(f"""✅ *PIPELINE FERTIG!*
 
 📊 {wortzahl:,} Wörter
 📚 {len(corrected)} Kapitel
 ⏱ {duration}
 📁 {output_dir}""")
+    
+    telegram_send_file(
+        open(roman_path).read(),
+        f"{titel_clean}.md",
+        f"📚 *{titel}*\n\n{wortzahl:,} Wörter | {len(corrected)} Kapitel"
+    )
     
     return output_path
 
