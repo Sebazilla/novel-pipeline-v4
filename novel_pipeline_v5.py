@@ -309,7 +309,7 @@ def telegram_approval(prompt: str, filepath: Path = None, timeout_minutes: int =
 # GEMINI API
 # ============================================================
 
-def call_gemini(prompt: str, max_tokens: int = 16000, use_flash: bool = False, retries: int = 3) -> str:
+def call_gemini(prompt: str, max_tokens: int = 32000, use_flash: bool = False, retries: int = 3) -> str:
     """Call Gemini API with retries"""
     model = GEMINI_MODEL_FLASH if use_flash else GEMINI_MODEL_PRO
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={GEMINI_API_KEY}"
@@ -440,7 +440,7 @@ FORMAT:
 [Drei Sätze]
 """
     
-    synopsis = call_gemini(prompt, max_tokens=2000)
+    synopsis = call_gemini(prompt, max_tokens=16000)
     
     if not synopsis:
         log("   ❌ Synopsis-Generierung fehlgeschlagen")
@@ -491,10 +491,10 @@ FORMAT:
 ## SYNOPSIS
 [Drei Sätze]
 """
-            synopsis = call_gemini(prompt, max_tokens=2000)
+            synopsis = call_gemini(prompt, max_tokens=16000)
         else:
             # Generate completely new
-            synopsis = call_gemini(f"{MASTER_STRUKTUR}\n\nErstelle eine komplett andere Buchidee als vorher. Sei kreativ!\n\nFORMAT:\n## ARBEITSTITEL\n[Titel]\n\n## SYNOPSIS\n[Drei Sätze]", max_tokens=2000)
+            synopsis = call_gemini(f"{MASTER_STRUKTUR}\n\nErstelle eine komplett andere Buchidee als vorher. Sei kreativ!\n\nFORMAT:\n## ARBEITSTITEL\n[Titel]\n\n## SYNOPSIS\n[Drei Sätze]", max_tokens=16000)
     
     # Extract title
     title_match = re.search(r'##\s*ARBEITSTITEL\s*\n+([^\n]+)', synopsis)
@@ -622,7 +622,7 @@ Für JEDEN Charakter erstelle ein detailliertes Profil:
 Sei KONKRET und SPEZIFISCH. Keine generischen Beschreibungen.
 """
     
-    charaktere_raw = call_gemini(prompt, max_tokens=12000)
+    charaktere_raw = call_gemini(prompt, max_tokens=16000)
     
     if not charaktere_raw:
         log("   ❌ Charaktererstellung fehlgeschlagen")
@@ -684,7 +684,7 @@ FEEDBACK:
 Überarbeite die Charaktere entsprechend dem Feedback.
 Behalte das gleiche Format bei.
 """
-            charaktere_raw = call_gemini(prompt, max_tokens=12000)
+            charaktere_raw = call_gemini(prompt, max_tokens=16000)
             save_md(all_chars_path, charaktere_raw)
     
     return charaktere
@@ -761,7 +761,7 @@ Für JEDEN Charakter:
 Schreibe 3000-4000 Wörter. Sei KONKRET, nicht vage.
 """
     
-    gliederung = call_gemini(prompt, max_tokens=8000)
+    gliederung = call_gemini(prompt, max_tokens=16000)
     
     if not gliederung:
         log("   ❌ Gliederungserstellung fehlgeschlagen")
@@ -818,7 +818,7 @@ CHARAKTERE:
 Überarbeite die Gliederung entsprechend dem Feedback.
 Behalte Umfang (3000-4000 Wörter) und Struktur bei.
 """
-            gliederung = call_gemini(prompt, max_tokens=8000)
+            gliederung = call_gemini(prompt, max_tokens=16000)
             save_md(gliederung_path, gliederung)
     
     log(f"   ✓ Gliederung bestätigt")
@@ -863,7 +863,7 @@ FORMAT:
 Begründe kurz deine Entscheidungen.
 """
     
-    struktur = call_gemini(prompt, max_tokens=4000)
+    struktur = call_gemini(prompt, max_tokens=16000)
     struktur_path = project_dir / "05_kapitel_struktur.md"
     save_md(struktur_path, struktur)
     
@@ -962,7 +962,7 @@ Für jede Szene:
 Schreibe 500-1000 Wörter. Sei KONKRET - jemand soll anhand dieser Gliederung das Kapitel schreiben können.
 """
         
-        kap_gliederung = call_gemini(prompt, max_tokens=4000)
+        kap_gliederung = call_gemini(prompt, max_tokens=16000)
         
         if not kap_gliederung:
             log(f"      ⚠️ Kapitel {kap_num} fehlgeschlagen")
@@ -1127,7 +1127,7 @@ ERSTELLE EINE MÄNGELLISTE:
 Sei gründlich! Jeder übersehene Fehler führt zu Problemen im fertigen Roman.
 """
     
-    check_result = call_gemini(prompt, max_tokens=8000, use_flash=True)
+    check_result = call_gemini(prompt, max_tokens=16000, use_flash=True)
     
     if not check_result:
         log("   ❌ Logik-Check fehlgeschlagen")
@@ -1378,7 +1378,7 @@ ERSTELLE FEEDBACK:
 [Kurzes Fazit]
 """
     
-    feedback = call_gemini(prompt, max_tokens=8000, use_flash=True)
+    feedback = call_gemini(prompt, max_tokens=16000, use_flash=True)
     
     feedback_path = project_dir / "09_final_check.md"
     save_md(feedback_path, feedback)
