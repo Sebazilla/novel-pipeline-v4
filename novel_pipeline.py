@@ -209,6 +209,48 @@ def telegram_send_file(content: str, filename: str, caption: str = "") -> bool:
         return False
 
 
+def text_to_speech(text: str, output_path: Path, voice: str = "Anna") -> Path:
+    """Konvertiert Text zu MP3 via macOS say + ffmpeg"""
+    import subprocess
+    import tempfile
+    
+    log(f"   🎧 Erstelle Hörbuch...")
+    
+    aiff_path = output_path / "audiobook.aiff"
+    mp3_path = output_path / "audiobook.mp3"
+    
+    try:
+        # Text zu AIFF
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as f:
+            f.write(text)
+            text_file = f.name
+        
+        subprocess.run([
+            'say', '-v', voice, '-f', text_file, '-o', str(aiff_path)
+        ], check=True, timeout=3600)  # Max 1h für langes Buch
+        
+        os.remove(text_file)
+        
+        # AIFF zu MP3
+        subprocess.run([
+            '/opt/homebrew/bin/ffmpeg', '-i', str(aiff_path),
+            '-codec:a', 'libmp3lame', '-qscale:a', '2',
+            str(mp3_path), '-y'
+        ], check=True, capture_output=True, timeout=600)
+        
+        # AIFF löschen
+        aiff_path.unlink()
+        
+        size_mb = mp3_path.stat().st_size / (1024*1024)
+        log(f"   ✓ Hörbuch erstellt: {size_mb:.1f} MB")
+        
+        return mp3_path
+        
+    except Exception as e:
+        log(f"   ⚠️ TTS Fehler: {e}")
+        return None
+
+
 def telegram_approval_file(filename: str, content: str, caption: str, timeout_minutes: int = 60) -> bool:
     """Telegram Approval mit Datei-Anhang für lange Inhalte"""
     # Datei senden
@@ -1497,6 +1539,24 @@ def run_pipeline(setting: str, output_dir: str = None):
         f"{titel_clean}.md",
         f"📚 *{titel}*\n\n{wortzahl:,} Wörter | {len(corrected)} Kapitel"
     )
+    
+    # Hörbuch erstellen und senden
+    mp3_path = text_to_speech(full_novel, output_path)
+    if mp3_path and mp3_path.exists():
+        # MP3 per Telegram senden (als Audio, nicht Dokument)
+        try:
+            url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendAudio"
+            with open(mp3_path, 'rb') as f:
+                requests.post(url, data={
+                    "chat_id": TELEGRAM_CHAT_ID,
+                    "title": titel,
+                    "performer": "Novel Pipeline V4"
+                }, files={
+                    "audio": (f"{titel_clean}.mp3", f, "audio/mpeg")
+                }, timeout=300)
+            log(f"   ✓ Hörbuch per Telegram gesendet")
+        except Exception as e:
+            log(f"   ⚠️ Hörbuch-Versand fehlgeschlagen: {e}")
     
     return output_path
 
