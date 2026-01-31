@@ -39,8 +39,8 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
-GEMINI_MODEL_PRO = "gemini-2.5-pro-preview-06-05"
-GEMINI_MODEL_FLASH = "gemini-2.5-flash-preview-05-20"
+GEMINI_MODEL_PRO = "gemini-2.5-pro"
+GEMINI_MODEL_FLASH = "gemini-2.5-flash"
 
 # ============================================================
 # MASTER-STRUKTUR (Der Roberts-Quinn-Code)
